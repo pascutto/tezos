@@ -36,11 +36,12 @@ module type Dump_interface = sig
   type key = step list
   type commit_info
 
+  type batch
+  val batch : index -> (batch -> 'a Lwt.t) -> 'a Lwt.t
+
   val commit_info_encoding : commit_info Data_encoding.t
 
   val hash_encoding : hash Data_encoding.t
-  val blob_encoding : [ `Blob of MBytes.t ] Data_encoding.t
-  val node_encoding : [ `Node of MBytes.t ] Data_encoding.t
 
   module Block_header : sig
     type t = Block_header.t
@@ -80,18 +81,11 @@ module type Dump_interface = sig
     val encoding : t Data_encoding.t
   end
 
-  (* hash manipulation *)
-  val hash_export : hash -> [ `Node | `Blob ] * MBytes.t
-  val hash_import : [ `Node | `Blob ]  -> MBytes.t -> hash tzresult
-  val hash_equal : hash -> hash -> bool
-
   (* commit manipulation (for parents) *)
-  val context_parents : context -> Commit_hash.t list Lwt.t
+  val context_parents : context -> Commit_hash.t list
 
   (* Commit info *)
   val context_info : context -> commit_info
-  val context_info_export : commit_info -> ( Int64.t * string * string )
-  val context_info_import : ( Int64.t * string * string ) -> commit_info
 
   (* block header manipulation *)
   val get_context : index -> Block_header.t -> context option Lwt.t
@@ -102,7 +96,7 @@ module type Dump_interface = sig
 
   (* for dumping *)
   val context_tree : context -> tree
-  val tree_hash : context -> tree -> hash Lwt.t
+  val tree_hash : tree -> hash
   val sub_tree : tree -> key -> tree option Lwt.t
   val tree_list : tree -> ( step * [`Contents|`Node] ) list Lwt.t
   val tree_content : tree -> MBytes.t option Lwt.t
@@ -110,9 +104,8 @@ module type Dump_interface = sig
   (* for restoring *)
   val make_context : index -> context
   val update_context : context -> tree -> context
-  val add_hash : index -> tree -> key -> hash -> tree option Lwt.t
-  val add_mbytes : index -> MBytes.t -> tree Lwt.t
-  val add_dir : index -> ( step * hash ) list -> tree option Lwt.t
+  val add_mbytes : batch -> MBytes.t -> tree Lwt.t
+  val add_dir : batch -> ( step * hash) list -> tree option Lwt.t
 
 end
 
@@ -498,7 +491,7 @@ module Make (I:Dump_interface) = struct
             I.sub_tree tree [name] >>= function
             | None -> assert false
             | Some sub_tree ->
-                I.tree_hash ctxt sub_tree >>= fun hash ->
+                let hash = I.tree_hash sub_tree in
                 begin
                   if visited hash then Lwt.return_unit
                   else
@@ -521,8 +514,8 @@ module Make (I:Dump_interface) = struct
                                 maybe_flush ()
                           end
                     end
-                end >>= fun () ->
-                Lwt.return (name, hash)
+                end >|= fun () ->
+                (name, hash)
           end
           keys >>= fun sub_keys ->
         set_node buf sub_keys;
@@ -540,7 +533,7 @@ module Make (I:Dump_interface) = struct
           let tree = I.context_tree ctxt in
           fold_tree_path ctxt tree >>= fun () ->
           Tezos_stdlib.Utils.display_progress_end ();
-          I.context_parents ctxt >>= fun parents ->
+          let parents = I.context_parents ctxt in
           set_root buf bh (I.context_info ctxt) parents block_data;
           (* Dump pruned blocks *)
           let dump_pruned cpt pruned =
@@ -591,19 +584,19 @@ module Make (I:Dump_interface) = struct
     let rbuf = ref (fd, Bytes.empty, 0, read) in
 
     (* Editing the repository *)
-    let add_blob blob =
-      I.add_mbytes index blob >>= fun tree ->
+    let add_blob t blob =
+      I.add_mbytes t blob >>= fun tree ->
       return tree
     in
 
-    let add_dir keys =
-      I.add_dir index keys >>= function
+    let add_dir t keys =
+      I.add_dir t keys >>= function
       | None -> fail Restore_context_failure
       | Some tree -> return tree
     in
 
     let restore history_mode =
-      let rec first_pass ctxt cpt =
+      let rec first_pass batch ctxt cpt =
         Tezos_stdlib.Utils.display_progress
           ~refresh_rate:(cpt, 1_000)
           "Context: %dK elements, %dMiB read"
@@ -616,14 +609,16 @@ module Make (I:Dump_interface) = struct
                   return (block_header, block_data)
             end
         | Node contents ->
-            add_dir contents >>=? fun tree ->
-            first_pass (I.update_context ctxt tree) (cpt + 1)
+            add_dir batch contents >>=? fun tree ->
+            first_pass batch (I.update_context ctxt tree) (cpt + 1)
         | Blob data ->
-            add_blob data >>=? fun tree ->
-            first_pass (I.update_context ctxt tree) (cpt + 1)
+            add_blob batch data >>=? fun tree ->
+            first_pass batch (I.update_context ctxt tree) (cpt + 1)
         | _ -> fail Inconsistent_snapshot_data in
 
-      let rec second_pass pred_header (rev_block_hashes, protocol_datas) todo cpt =
+      let rec second_pass
+          batch pred_header (rev_block_hashes, protocol_datas) todo cpt
+        =
         Tezos_stdlib.Utils.display_progress
           ~refresh_rate:(cpt, 1_000)
           "Store: %dK elements, %dMiB read"
@@ -639,10 +634,10 @@ module Make (I:Dump_interface) = struct
                     k_store_pruned_block pruned_block hash
                   end ((hash, pruned_block) :: todo)
                 end >>=? fun () ->
-                second_pass (Some header)
+                second_pass batch (Some header)
                   (hash :: rev_block_hashes, protocol_datas) [] (cpt + 1)
               else
-                second_pass (Some header)
+                second_pass batch (Some header)
                   (hash :: rev_block_hashes, protocol_datas) ((hash, pruned_block) :: todo) (cpt + 1)
             end
         | Loot protocol_data ->
@@ -650,13 +645,18 @@ module Make (I:Dump_interface) = struct
               Error_monad.iter_s (fun (hash, pruned_block) ->
                   k_store_pruned_block pruned_block hash) todo
             end >>=? fun () ->
-            second_pass pred_header (rev_block_hashes, protocol_data :: protocol_datas) todo (cpt + 1)
+            second_pass batch pred_header
+              (rev_block_hashes, protocol_data :: protocol_datas) todo (cpt + 1)
         | End ->
             return (pred_header, rev_block_hashes, List.rev protocol_datas)
         | _ -> fail Inconsistent_snapshot_data in
-      first_pass (I.make_context index) 0 >>=? fun (block_header, block_data) ->
+      I.batch index (fun batch ->
+          first_pass batch (I.make_context index) 0
+        ) >>=? fun (block_header, block_data) ->
       Tezos_stdlib.Utils.display_progress_end () ;
-      second_pass None ([], []) [] 0 >>=? fun (oldest_header_opt, rev_block_hashes, protocol_datas) ->
+      I.batch index (fun batch ->
+          second_pass batch None ([], []) [] 0
+        ) >>=? fun (oldest_header_opt, rev_block_hashes, protocol_datas) ->
       Tezos_stdlib.Utils.display_progress_end () ;
       return (block_header,
               block_data,
