@@ -391,7 +391,7 @@ module Index (H : Irmin.Hash.S) = struct
   let pad = H.digest_size + offset_size + length_size
 
   (* last allowed offset *)
-  let log_size = 300 * pad
+  let log_size = 30_000 * pad
 
   let log_sizeL = Int64.of_int log_size
 
