@@ -485,21 +485,25 @@ module Index (H : Irmin.Hash.S) = struct
 
   let padf = float_of_int pad
 
+  let get_entry_iff_needed t off = function
+  | Some e -> Lwt.return e
+  | None -> get_entry t (Int64.of_float off)
+
   let interpolation_search t key =
     let hashed_key = H.hash key in
     Log.debug (fun l -> l "interpolation_search %a (%d)" pp_hash key hashed_key);
     let hashed_key = float_of_int hashed_key in
     let low = 0. in
     let high = Int64.to_float (IO.offset t.index) -. padf in
-    let rec search low high =
-      get_entry t (Int64.of_float low) >>= fun lowest_entry ->
-      let lowest_hash = float_of_int (H.hash lowest_entry.hash) in
+    let rec search low high lowest_entry highest_entry =
+      get_entry_iff_needed t low lowest_entry >>= fun lowest_entry ->
+      get_entry_iff_needed t high highest_entry >>= fun highest_entry ->
       if high = low then
         if Irmin.Type.equal H.t lowest_entry.hash key then
           Lwt.return_some lowest_entry
         else Lwt.return_none
       else
-        get_entry t (Int64.of_float high) >>= fun highest_entry ->
+        let lowest_hash = float_of_int (H.hash lowest_entry.hash) in
         let highest_hash = float_of_int (H.hash highest_entry.hash) in
         if high < low || lowest_hash > hashed_key || highest_hash < hashed_key
         then Lwt.return_none
@@ -513,12 +517,14 @@ module Index (H : Irmin.Hash.S) = struct
           let off = low +. doff -. mod_float doff padf in
           let offL = Int64.of_float off in
           get_entry t offL >>= fun e ->
-          if Irmin.Type.equal H.t e.hash key then Lwt.return (Some e)
+          if Irmin.Type.equal H.t e.hash key then Lwt.return_some e
           else if float_of_int (H.hash e.hash) < hashed_key then
-            search (off +. padf) high
-          else search low (max 0. (off -. padf))
+            search (off +. padf) high None (Some highest_entry)
+          else
+            search low (off -. padf) (Some lowest_entry) None
     in
-    if high < 0. then Lwt.return_none else search low high
+    if high < 0. then Lwt.return_none
+    else search low high None None
 
   (*  let dump_entry ppf e = Fmt.pf ppf "[offset:%Ld len:%d]" e.offset e.len *)
 
