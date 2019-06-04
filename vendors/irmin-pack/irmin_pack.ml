@@ -391,7 +391,7 @@ module Index (H : Irmin.Hash.S) = struct
   let pad = H.digest_size + offset_size + length_size
 
   (* last allowed offset *)
-  let log_size = 30_000 * pad
+  let log_size = 500_000 * pad
 
   let log_sizeL = Int64.of_int log_size
 
@@ -415,9 +415,9 @@ module Index (H : Irmin.Hash.S) = struct
 
   module BF = Bloomf.Make (H)
 
-  let lru_size = 1000
+  let lru_size = 30_000
 
-  let page_size = 1000 * pad
+  let page_size = 10_000 * pad
 
   type t = {
     cache : entry Tbl.t;
@@ -463,14 +463,14 @@ module Index (H : Irmin.Hash.S) = struct
       else Lwt.return () )
       >|= fun () ->
       let t =
-        { cache = Tbl.create 997;
+        { cache = Tbl.create log_size;
           root;
-          offsets = Hashtbl.create 997;
+          offsets = Hashtbl.create log_size;
           pages = Pool.v ~length:page_size ~lru_size index;
           log;
           index;
           lock = Lwt_mutex.create ();
-          entries = BF.create ~error_rate:0.1 500_000
+          entries = BF.create ~error_rate:0.01 100_000_000
         }
       in
       Hashtbl.add files root t;
@@ -695,7 +695,7 @@ module Pack (K : Irmin.Hash.S) = struct
       let hash = Irmin.Type.hash K.t
     end)
 
-    let lru_size = 10_000
+    let lru_size = 30_000
 
     let page_size = 1024
 
