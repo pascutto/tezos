@@ -49,7 +49,7 @@ module Term = struct
       Store.Configuration.History_mode.read store >>=? fun history_mode ->
       begin
         if history_mode = History_mode.Full then
-          Snapshots.reconstruct_contexts_exposed
+          Snapshots.reconstruct_contexts_exposed ~data_dir
             chain_id ~block store chain_state context_index
         else
           failwith "Full mode allowed only"

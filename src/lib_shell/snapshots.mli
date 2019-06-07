@@ -54,6 +54,7 @@ val import:
   unit tzresult Lwt.t
 
 val reconstruct_contexts_exposed:
+  data_dir:string ->
   Chain_id.t ->
   block:string option ->
   Raw_store.t -> State.Chain.t -> Context.index -> unit tzresult Lwt.t

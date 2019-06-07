@@ -392,7 +392,7 @@ let update_caboose chain_data ~genesis block_header oldest_header max_op_ttl =
   Store.Chain_data.Caboose.store chain_data (caboose_level, caboose_hash) >>= fun () ->
   return_unit
 
-let reconstruct_contexts
+let reconstruct_contexts ~context_root
     store context_index chain_id block_store chain_state chain_store
     (history_list : Block_hash.t list) =
 
@@ -406,10 +406,28 @@ let reconstruct_contexts
   let limit = Array.length history in
   let rec reconstruct_chunks level =
     Store.with_atomic_rw store begin fun () ->
+    let t0 = Unix.gettimeofday () in
+      Fmt.epr "# time, level, dict, index, pack, mem\n%!";
       let rec reconstruct_chunks level =
-        Tezos_stdlib.Utils.display_progress
-          "Reconstructing contexts: %i/%i"
-          level limit ;
+        if level mod 10 = 0 then (
+          let gc = (* in MiB *)
+            let s = Gc.stat () in
+            let w = float_of_int s.live_words in
+            int_of_float (8. *. w /. 1024. /. 1024.)
+          in
+          let file f = (* in MiB *)
+            try (Unix.stat f).st_size / 1024 / 1024 with
+            | Unix.Unix_error (Unix.ENOENT, _, _) -> 0
+          in
+          let data = file (Filename.concat context_root "data.mdb") in
+          let time = (* in seconds *)
+            int_of_float (Unix.gettimeofday () -. t0) in
+          Fmt.epr "%d, %d, %d, %d\n%!"
+            time
+            level
+            data
+            gc;
+        );
         if level = limit then
           return level
         else
@@ -486,7 +504,8 @@ let reconstruct_contexts
   Store.Chain_data.Caboose.store chain_data (0l, genesis_hash) >>= fun () ->
   return_unit
 
-let reconstruct_contexts_exposed chain_id ~block store chain_state context_index =
+let reconstruct_contexts_exposed ~data_dir chain_id ~block store chain_state context_index =
+  let context_root = context_dir data_dir in
 
   let chain_store = Store.Chain.get store chain_id in
   let block_store = Store.Block.get chain_store in
@@ -509,7 +528,7 @@ let reconstruct_contexts_exposed chain_id ~block store chain_state context_index
       gather_all_blocks header.shell.predecessor (block_hash :: acc)
   in gather_all_blocks block [] >>=? fun l ->
 
-  reconstruct_contexts store context_index chain_id block_store chain_state chain_store l
+  reconstruct_contexts ~context_root store context_index chain_id block_store chain_state chain_store l
 
 
 let import_protocol_data index store block_hash_arr level_oldest_block (level, protocol_data) =
@@ -722,7 +741,7 @@ let import ?(reconstruct = false) ~data_dir ~dir_cleaner ~patch_context ~genesis
            | true ->
                if history_mode = History_mode.Full then
                  (* combine is not tail-rec *)
-                 reconstruct_contexts
+                 reconstruct_contexts ~context_root
                    store context_index chain_id block_store chain_state chain_store
                    rev_block_hashes
                else
