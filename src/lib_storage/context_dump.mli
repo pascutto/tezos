@@ -131,11 +131,12 @@ module type S = sig
     fd:Lwt_unix.file_descr -> unit tzresult Lwt.t
 
   val restore_contexts_fd : index -> Raw_store.t -> fd:Lwt_unix.file_descr ->
+    should_keep_pruned_blocks: bool ->
     (pruned_block -> Block_hash.t -> unit tzresult Lwt.t) ->
     (block_header option ->
      Block_hash.t -> pruned_block -> unit tzresult Lwt.t) ->
     (block_header * block_data * History_mode.t *
-     Block_header.t option * Block_hash.t list * protocol_data list) tzresult Lwt.t
+     Block_header.t option * Block_hash.t list * protocol_data list * pruned_block list option) tzresult Lwt.t
 end
 
 module Make (I:Dump_interface) : S

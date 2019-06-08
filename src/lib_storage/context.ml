@@ -808,7 +808,8 @@ let dump_contexts idx datas ~filename =
   >>=? fun fd ->
   dump_contexts_fd idx datas ~fd
 
-let restore_contexts idx store ~filename k_store_pruned_block pipeline_validation =
+let restore_contexts idx store ~filename ~should_keep_pruned_blocks k_store_pruned_block
+    pipeline_validation =
   let file_init () =
     Lwt_unix.openfile filename Lwt_unix.[O_RDONLY;] 0o600
     >>= return
@@ -822,7 +823,8 @@ let restore_contexts idx store ~filename k_store_pruned_block pipeline_validatio
   >>=? fun fd ->
   Lwt.finalize
     (fun () ->
-       restore_contexts_fd idx store ~fd k_store_pruned_block pipeline_validation
+       restore_contexts_fd idx store ~fd ~should_keep_pruned_blocks
+         k_store_pruned_block pipeline_validation
        >>=? fun result ->
        Lwt_unix.lseek fd 0 Lwt_unix.SEEK_CUR
        >>= fun current ->

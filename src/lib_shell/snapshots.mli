@@ -24,6 +24,16 @@
 (*                                                                           *)
 (*****************************************************************************)
 
+type error += Wrong_snapshot_export of History_mode.t * History_mode.t
+type error += Wrong_block_export of
+    Block_hash.t * [ `Pruned | `Too_few_predecessors | `Cannot_be_found ]
+type error += Inconsistent_imported_block of Block_hash.t * Block_hash.t
+type error += Snapshot_import_failure of string
+type error += Wrong_protocol_hash of Protocol_hash.t
+type error += Inconsistent_operation_hashes of
+    (Operation_list_list_hash.t * Operation_list_list_hash.t)
+type error += Wrong_reconstruct_mode
+
 val export:
   ?export_rolling:bool ->
   context_index:Context.index ->
@@ -34,6 +44,7 @@ val export:
   unit tzresult Lwt.t
 
 val import:
+  ?reconstruct:bool ->
   data_dir:string ->
   dir_cleaner:(string -> unit Lwt.t) ->
   patch_context:('a option -> Context.t -> Context.t Lwt.t) ->
@@ -41,3 +52,8 @@ val import:
   string ->
   string option ->
   unit tzresult Lwt.t
+
+val reconstruct_contexts_exposed:
+  Chain_id.t ->
+  block:string option ->
+  Raw_store.t -> State.Chain.t -> Context.index -> unit tzresult Lwt.t

@@ -124,11 +124,13 @@ module type S = sig
     fd:Lwt_unix.file_descr -> unit tzresult Lwt.t
 
   val restore_contexts_fd : index -> Raw_store.t -> fd:Lwt_unix.file_descr ->
+    should_keep_pruned_blocks: bool ->
     (pruned_block -> Block_hash.t -> unit tzresult Lwt.t) ->
     (block_header option ->
      Block_hash.t -> pruned_block -> unit tzresult Lwt.t) ->
     (block_header * block_data * History_mode.t *
-     Block_header.t option * Block_hash.t list * protocol_data list) tzresult Lwt.t
+     Block_header.t option * Block_hash.t list *
+     protocol_data list * pruned_block list option) tzresult Lwt.t
 
 end
 
@@ -256,7 +258,7 @@ let () = begin
           "Internal error while restoring the context.")
     empty
     (function Restore_context_failure -> Some () | _ -> None)
-    (fun () -> Restore_context_failure);
+    (fun () -> Restore_context_failure) ;
 
 end
 
@@ -578,7 +580,8 @@ module Make (I:Dump_interface) = struct
 
   (* Restoring *)
 
-  let restore_contexts_fd index store ~fd k_store_pruned_block block_validation =
+  let restore_contexts_fd index store ~fd ~should_keep_pruned_blocks
+      k_store_pruned_block block_validation  =
 
     let read = ref 0 in
     let rbuf = ref (fd, Bytes.empty, 0, read) in
@@ -617,7 +620,7 @@ module Make (I:Dump_interface) = struct
         | _ -> fail Inconsistent_snapshot_data in
 
       let rec second_pass
-          batch pred_header (rev_block_hashes, protocol_datas) todo cpt
+          batch pred_header (rev_block_hashes, protocol_datas, rev_pruned_blocks) todo cpt
         =
         Tezos_stdlib.Utils.display_progress
           ~refresh_rate:(cpt, 1_000)
@@ -628,6 +631,11 @@ module Make (I:Dump_interface) = struct
             let header = I.Pruned_block.header pruned_block in
             let hash = Block_header.hash header in
             block_validation pred_header hash pruned_block >>=? fun () ->
+            let rev_pruned_blocks =
+              if should_keep_pruned_blocks then
+                pruned_block :: rev_pruned_blocks
+              else
+                [] in
             begin if (cpt + 1) mod 5_000 = 0 then
                 Raw_store.with_atomic_rw store begin fun () ->
                   Error_monad.iter_s begin fun (hash, pruned_block) ->
@@ -635,10 +643,10 @@ module Make (I:Dump_interface) = struct
                   end ((hash, pruned_block) :: todo)
                 end >>=? fun () ->
                 second_pass batch (Some header)
-                  (hash :: rev_block_hashes, protocol_datas) [] (cpt + 1)
+                  (hash :: rev_block_hashes, protocol_datas, rev_pruned_blocks) [] (cpt + 1)
               else
                 second_pass batch (Some header)
-                  (hash :: rev_block_hashes, protocol_datas) ((hash, pruned_block) :: todo) (cpt + 1)
+                  (hash :: rev_block_hashes, protocol_datas, rev_pruned_blocks) ((hash, pruned_block) :: todo) (cpt + 1)
             end
         | Loot protocol_data ->
             Raw_store.with_atomic_rw store begin fun () ->
@@ -646,24 +654,32 @@ module Make (I:Dump_interface) = struct
                   k_store_pruned_block pruned_block hash) todo
             end >>=? fun () ->
             second_pass batch pred_header
-              (rev_block_hashes, protocol_data :: protocol_datas) todo (cpt + 1)
+              (rev_block_hashes, protocol_data :: protocol_datas, rev_pruned_blocks) todo (cpt + 1)
         | End ->
-            return (pred_header, rev_block_hashes, List.rev protocol_datas)
+            return (pred_header, rev_block_hashes, List.rev protocol_datas, List.rev rev_pruned_blocks)
         | _ -> fail Inconsistent_snapshot_data in
       I.batch index (fun batch ->
           first_pass batch (I.make_context index) 0
         ) >>=? fun (block_header, block_data) ->
       Tezos_stdlib.Utils.display_progress_end () ;
       I.batch index (fun batch ->
-          second_pass batch None ([], []) [] 0
-        ) >>=? fun (oldest_header_opt, rev_block_hashes, protocol_datas) ->
+          second_pass batch None ([], [], []) [] 0
+        ) >>=? fun (oldest_header_opt, rev_block_hashes, protocol_datas, rev_pruned_blocks) ->
       Tezos_stdlib.Utils.display_progress_end () ;
+
+      let rev_pruned_blocks_opt =
+         if should_keep_pruned_blocks then
+           Some rev_pruned_blocks
+         else
+           None in
+
       return (block_header,
               block_data,
               history_mode,
               oldest_header_opt,
               rev_block_hashes,
-              protocol_datas)
+              protocol_datas,
+             rev_pruned_blocks_opt)
     in
     (* Check snapshot version *)
     read_snapshot_metadata rbuf >>=? fun version ->

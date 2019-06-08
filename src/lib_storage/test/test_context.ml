@@ -269,10 +269,11 @@ let test_dump { idx ; block3b; _ } =
       | Error _ -> Assert.fail_msg "wrap_store_init"
       | Ok store -> Lwt.return store end >>= fun store ->
     Context.restore_contexts idx2 store
+      ~should_keep_pruned_blocks:false
       ~filename:dumpfile (fun _ _ -> return_unit)
       (fun _ _ _ -> return_unit)
     >>=? fun imported ->
-    let (bh, _, _, _, _, _) = imported in
+    let (bh, _, _, _, _, _, _) = imported in
     let expected_ctxt_hash = bh.Block_header.shell.context in
     assert (Context_hash.equal ctxt_hash expected_ctxt_hash) ;
     return ()
