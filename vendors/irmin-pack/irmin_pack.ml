@@ -249,7 +249,6 @@ module Pool : sig
   val read : t -> off:int64 -> len:int -> (bytes * int) Lwt.t
 
   val clear : t -> unit
-
 end = struct
   module Lru =
     Lru.M.Make (struct
@@ -296,7 +295,6 @@ end = struct
         (buf, ioff)
 
   let clear t = t.pages <- Lru.create t.lru_size
-
 end
 
 module Dict = struct
@@ -484,8 +482,8 @@ module Index (H : Irmin.Hash.S) = struct
   let padf = float_of_int pad
 
   let get_entry_iff_needed t off = function
-  | Some e -> Lwt.return e
-  | None -> get_entry t (Int64.of_float off)
+    | Some e -> Lwt.return e
+    | None -> get_entry t (Int64.of_float off)
 
   let interpolation_search t key =
     let hashed_key = H.hash key in
@@ -518,11 +516,9 @@ module Index (H : Irmin.Hash.S) = struct
           if Irmin.Type.equal H.t e.hash key then Lwt.return_some e
           else if float_of_int (H.hash e.hash) < hashed_key then
             search (off +. padf) high None (Some highest_entry)
-          else
-            search low (off -. padf) (Some lowest_entry) None
+          else search low (off -. padf) (Some lowest_entry) None
     in
-    if high < 0. then Lwt.return_none
-    else search low high None None
+    if high < 0. then Lwt.return_none else search low high None None
 
   (*  let dump_entry ppf e = Fmt.pf ppf "[offset:%Ld len:%d]" e.offset e.len *)
 
@@ -632,7 +628,7 @@ module type S = sig
 
   val to_bin :
     dict:(string -> int Lwt.t) ->
-    offset:(hash -> int64 Lwt.t) ->
+    offset:(hash -> int64 option Lwt.t) ->
     t ->
     hash ->
     string Lwt.t
@@ -803,8 +799,8 @@ module Pack (K : Irmin.Hash.S) = struct
           Log.debug (fun l -> l "[pack] append %a" pp_hash k);
           let offset k =
             Index.find t.pack.index k >|= function
-            | Some e -> e.offset
-            | None -> Fmt.failwith "cannot find %a" pp_hash k
+            | Some e -> Some e.offset
+            | None -> None
           in
           let dict = Dict.index t.pack.dict in
           V.to_bin ~offset ~dict v k >>= fun buf ->
@@ -1043,30 +1039,49 @@ struct
         module Key = H
         module Val = Node
 
-        module Int = struct
-          type t = int64
+        module Compress = struct
+          type address = Indirect of int64 | Direct of H.t
 
-          type step = int64
+          type value = Contents of address * M.t | Node of address
 
-          let step_t = Irmin.Type.int64
-
-          let t = Irmin.Type.int64
+          let value =
+            let open Irmin.Type in
+            variant "x-val" (fun contents_i node_i contents_d node_d ->
+              function
+              | Contents (Indirect h, m) -> contents_i (h, m)
+              | Node (Indirect h) -> node_i h
+              | Contents (Direct h, m) -> contents_d (h, m)
+              | Node (Direct h) -> node_d h )
+            |~ case1 "contents-i" (pair int64 M.t) (fun (i, m) ->
+                   Contents (Indirect i, m) )
+            |~ case1 "node-i" int64 (fun i -> Node (Indirect i))
+            |~ case1 "contents-d" (pair H.t M.t) (fun (h, m) ->
+                   Contents (Direct h, m) )
+            |~ case1 "node-d" H.t (fun h -> Node (Direct h))
+            |> sealv
         end
 
-        module Val_int = Irmin.Private.Node.Make (Int) (Int) (M)
-
         include Pack.Make (struct
+          open Compress
           include Val
 
           let entries_t =
-            Irmin.Type.(pair H.t (list (pair int Val_int.value_t)))
+            Irmin.Type.(pair H.t (list (pair int Compress.value)))
 
           let to_bin ~dict ~offset t k =
             let entries = Val.list t in
             let step s = dict (Irmin.Type.to_bin_string P.step_t s) in
             let value = function
-              | `Contents (v, m) -> offset v >|= fun off -> `Contents (off, m)
-              | `Node v -> offset v >|= fun off -> `Node off
+              | `Contents (h, m) ->
+                  (offset h >|= function
+                   | None -> Direct h
+                   | Some off -> Indirect off)
+                  >|= fun v -> Contents (v, m)
+              | `Node h ->
+                  (offset h >|= function
+                   | None -> Direct h
+                   | Some off -> Indirect off)
+                  >|= fun v -> Node v
             in
             Lwt_list.map_p
               (fun (s, v) -> step s >>= fun s -> value v >|= fun v -> (s, v))
@@ -1090,8 +1105,11 @@ struct
                 | Ok v -> v )
             in
             let value = function
-              | `Contents (off, m) -> hash off >|= fun v -> `Contents (v, m)
-              | `Node off -> hash off >|= fun v -> `Node v
+              | Contents (Indirect off, m) ->
+                  hash off >|= fun h -> `Contents (h, m)
+              | Contents (Direct h, m) -> Lwt.return (`Contents (h, m))
+              | Node (Indirect off) -> hash off >|= fun h -> `Node h
+              | Node (Direct h) -> Lwt.return (`Node h)
             in
             Lwt.catch
               (fun () ->

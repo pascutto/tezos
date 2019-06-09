@@ -734,13 +734,7 @@ let validate_context_hash_consistency_and_commit
   if Context_hash.equal expected_context_hash computed_context_hash then
     let ctxt =
       let parent = Store.of_private_commit index.repo commit in
-      let parents = List.map (fun h ->
-          if Irmin.Type.equal Hash.t h (Store.Commit.hash parent)
-          then parent
-          else invalid_arg "mock parent hash"
-        ) parents
-      in
-      {index ; tree = Store.Tree.empty ; parents}
+      {index ; tree = Store.Tree.empty ; parents = [parent]}
     in
     set_test_chain ctxt test_chain >>= fun ctxt ->
     set_protocol ctxt protocol_hash >>= fun ctxt ->
