@@ -416,12 +416,22 @@ let reconstruct_contexts ~context_root
             int_of_float (8. *. w /. 1024. /. 1024.)
           in
           let file f = (* in MiB *)
-            try (Unix.stat f).st_size / 1024 / 1024 with
+            try (Unix.stat f).st_size with
             | Unix.Unix_error (Unix.ENOENT, _, _) -> 0
           in
-          let dict = file (Filename.concat context_root "store.dict") in
-          let index = file (Filename.concat context_root "store.index") in
-          let pack = file (Filename.concat context_root "store.pack") in
+          let dict =
+            file (Filename.concat context_root "store.dict") / 1024 / 1024 in
+          let index =
+            let rec aux acc i =
+              if i = 256 then acc else
+              let filename = Format.sprintf "store.index.%d" i in
+              let s = file (Filename.concat context_root filename) in
+              aux (acc + s) (i + 1)
+            in
+            aux 0 0 / 1024 / 1024
+          in
+          let pack =
+            file (Filename.concat context_root "store.pack") / 1024 / 1024 in
           let time = (* in seconds *)
             int_of_float (Unix.gettimeofday () -. t0) in
           Fmt.epr "%d, %d, %d, %d, %d, %d\n%!"

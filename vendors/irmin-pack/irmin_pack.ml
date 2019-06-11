@@ -411,26 +411,39 @@ module Index (H : Irmin.Hash.S) = struct
     let equal x y = Irmin.Type.equal H.t x y
   end)
 
-  let lru_size = 30_000
+  let lru_size = 3_000
 
   let page_size = 10_000 * pad
 
+  let fan_out_size = 256
+
   type t = {
     cache : entry Tbl.t;
-    pages : Pool.t;
+    pages : Pool.t array;
     offsets : (int64, entry) Hashtbl.t;
     log : IO.t;
-    index : IO.t;
+    index : IO.t array;
     entries : H.t Bloomf.t;
     root : string;
     lock : Lwt_mutex.t
   }
 
+  (* let array_iter_lwt f arr =
+    Lwt.join (List.init (Array.length arr) (fun i -> f arr.(i))) *)
+
+  let array_init_lwt (n : int) (f : int -> 'a Lwt.t) : 'a array Lwt.t =
+    f 0 >>= fun f_0 ->
+    let arr = Array.make n f_0 in
+    Lwt.join
+      (List.init (Array.length arr) (fun i -> f i >|= fun f_i -> arr.(i) <- f_i))
+    >|= fun () -> arr
+
   let unsafe_clear t =
     IO.clear t.log >>= fun () ->
-    IO.clear t.index >|= fun () ->
+    Lwt.join (List.init (Array.length t.index) (fun i -> IO.clear t.index.(i)))
+    >|= fun () ->
     Bloomf.clear t.entries;
-    Pool.clear t.pages;
+    Array.iter (fun p -> Pool.clear p) t.pages;
     Tbl.clear t.cache;
     Hashtbl.clear t.offsets
 
@@ -454,15 +467,20 @@ module Index (H : Irmin.Hash.S) = struct
       (if fresh then clear t else Lwt.return ()) >|= fun () -> t
     with Not_found ->
       IO.v log_path >>= fun log ->
-      IO.v index_path >>= fun index ->
-      ( if fresh then IO.clear log >>= fun () -> IO.clear index
-      else Lwt.return () )
-      >|= fun () ->
+      array_init_lwt fan_out_size (fun i ->
+          let index_path = Printf.sprintf "%s.%d" index_path i in
+          IO.v index_path >>= fun index ->
+          (if fresh then IO.clear index else Lwt.return_unit) >|= fun () ->
+          index )
+      >>= fun index ->
+      (if fresh then IO.clear log else Lwt.return ()) >|= fun () ->
       let t =
         { cache = Tbl.create log_size;
           root;
           offsets = Hashtbl.create log_size;
-          pages = Pool.v ~length:page_size ~lru_size index;
+          pages =
+            Array.init fan_out_size (fun i ->
+                Pool.v ~length:page_size ~lru_size index.(i) );
           log;
           index;
           lock = Lwt_mutex.create ();
@@ -475,25 +493,25 @@ module Index (H : Irmin.Hash.S) = struct
   let v ?fresh root =
     Lwt_mutex.with_lock create (fun () -> unsafe_v ?fresh root)
 
-  let get_entry t off =
-    Pool.read t.pages ~off ~len:pad >|= fun (page, ioff) ->
+  let get_entry t i off =
+    Pool.read t.pages.(i) ~off ~len:pad >|= fun (page, ioff) ->
     decode_entry page ioff
 
   let padf = float_of_int pad
 
-  let get_entry_iff_needed t off = function
+  let get_entry_iff_needed t i off = function
     | Some e -> Lwt.return e
-    | None -> get_entry t (Int64.of_float off)
+    | None -> get_entry t i (Int64.of_float off)
 
-  let interpolation_search t key =
+  let interpolation_search t i key =
     let hashed_key = H.hash key in
     Log.debug (fun l -> l "interpolation_search %a (%d)" pp_hash key hashed_key);
     let hashed_key = float_of_int hashed_key in
     let low = 0. in
-    let high = Int64.to_float (IO.offset t.index) -. padf in
+    let high = Int64.to_float (IO.offset t.index.(i)) -. padf in
     let rec search low high lowest_entry highest_entry =
-      get_entry_iff_needed t low lowest_entry >>= fun lowest_entry ->
-      get_entry_iff_needed t high highest_entry >>= fun highest_entry ->
+      get_entry_iff_needed t i low lowest_entry >>= fun lowest_entry ->
+      get_entry_iff_needed t i high highest_entry >>= fun highest_entry ->
       if high = low then
         if Irmin.Type.equal H.t lowest_entry.hash key then
           Lwt.return_some lowest_entry
@@ -512,7 +530,7 @@ module Index (H : Irmin.Hash.S) = struct
           in
           let off = low +. doff -. mod_float doff padf in
           let offL = Int64.of_float off in
-          get_entry t offL >>= fun e ->
+          get_entry t i offL >>= fun e ->
           if Irmin.Type.equal H.t e.hash key then Lwt.return_some e
           else if float_of_int (H.hash e.hash) < hashed_key then
             search (off +. padf) high None (Some highest_entry)
@@ -528,7 +546,9 @@ module Index (H : Irmin.Hash.S) = struct
     else
       match Tbl.find t.cache key with
       | e -> Lwt.return (Some e)
-      | exception Not_found -> interpolation_search t key
+      | exception Not_found ->
+          let i = H.hash key land (fan_out_size - 1) in
+          interpolation_search t i key
 
   let find t key = Lwt_mutex.with_lock t.lock (fun () -> unsafe_find t key)
 
@@ -546,18 +566,27 @@ module Index (H : Irmin.Hash.S) = struct
     let compare a b = compare (H.hash a) (H.hash b)
   end)
 
-  let merge_with t tmp =
-    let log_list =
-      Tbl.fold (fun h k acc -> HashMap.add h k acc) t.cache HashMap.empty
-      |> HashMap.bindings
+  let fan_out_cache t n =
+    let caches = Array.make n [] in
+    let () =
+      Tbl.iter
+        (fun k v ->
+          let index = H.hash k land (n - 1) in
+          caches.(index) <- (k, v) :: caches.(index) )
+        t.cache
     in
+    Array.map
+      (List.sort (fun (k, _) (k', _) -> compare (H.hash k) (H.hash k')))
+      caches
+
+  let merge_with log t i tmp =
     let offset = ref 0L in
     let get_index_entry = function
       | Some e -> Lwt.return (Some e)
       | None ->
-          if !offset >= IO.offset t.index then Lwt.return None
+          if !offset >= IO.offset t.index.(i) then Lwt.return None
           else
-            get_entry t !offset >|= fun e ->
+            get_entry t i !offset >|= fun e ->
             offset := !offset ++ Int64.of_int pad;
             Some e
     in
@@ -579,30 +608,36 @@ module Index (H : Irmin.Hash.S) = struct
                 append_entry tmp e >|= fun () -> (None, l)
               else append_entry tmp v >|= fun () -> (Some e, r) )
             >>= fun (last, rst) ->
-            if !offset >= IO.offset t.index && last = None then
+            if !offset >= IO.offset t.index.(i) && last = None then
               Lwt_list.iter_s (fun (_, e) -> append_entry tmp e) rst
             else go last rst
         | [] ->
             append_entry tmp e >>= fun () ->
-            if !offset >= IO.offset t.index then Lwt.return_unit
+            if !offset >= IO.offset t.index.(i) then Lwt.return_unit
             else
-              let len = IO.offset t.index -- !offset in
+              let len = IO.offset t.index.(i) -- !offset in
               let buf = Bytes.create (Int64.to_int len) in
-              IO.read t.index ~off:!offset buf >>= fun () ->
+              IO.read t.index.(i) ~off:!offset buf >>= fun () ->
               IO.append tmp (Bytes.unsafe_to_string buf) )
     in
-    go None log_list
+    go None log
 
   let merge t =
     IO.sync t.log >>= fun () ->
+    let log = fan_out_cache t fan_out_size in
     let tmp_path = t.root // "store.index.tmp" in
-    IO.v tmp_path >>= fun tmp ->
-    merge_with t tmp >>= fun () ->
-    IO.rename ~src:tmp ~dst:t.index >>= fun () ->
+    let jobs =
+      List.init fan_out_size (fun i ->
+          let tmp_path = Format.sprintf "%s.%d" tmp_path i in
+          IO.v tmp_path >>= fun tmp ->
+          merge_with log.(i) t i tmp >>= fun () ->
+          IO.rename ~src:tmp ~dst:t.index.(i) )
+    in
+    Lwt.join jobs >>= fun () ->
     (* reset the log *)
     IO.clear t.log >|= fun () ->
     Tbl.clear t.cache;
-    Pool.clear t.pages;
+    Array.iter (fun p -> Pool.clear p) t.pages;
     Hashtbl.clear t.offsets
 
   (* do not check for duplicates *)
