@@ -195,7 +195,7 @@ let checkout index key =
   | None -> Lwt.return_none
   | Some commit ->
       let tree = Store.Commit.tree commit in
-      Store.Tree.clear_caches tree;
+      Store.Tree.clear tree;
       let ctxt = {index; tree; parents= [commit]} in
       Lwt.return_some ctxt
 
@@ -209,7 +209,7 @@ let raw_commit ~time ?(message = "") context =
   in
   let parents = List.map Store.Commit.hash context.parents in
   (* empty the cache on commit *)
-  Store.Tree.clear_caches context.tree;
+  Store.Tree.clear context.tree;
   Store.Commit.v context.index.repo ~info ~parents context.tree
 
 let hash ~time ?(message = "") context =
@@ -646,7 +646,7 @@ module Dumpable_context = struct
         (* Save the node in the store ... *)
         Store.save_tree repo x y tree >|= fun _ ->
         (* ... and forget about it *)
-        Store.Tree.clear_caches tree;
+        Store.Tree.clear tree;
         Some tree
 
   module Commit_hash = Context_hash
