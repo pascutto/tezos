@@ -305,13 +305,6 @@ module Dict = struct
     lock : Lwt_mutex.t
   }
 
-  let read_length32 ~off block =
-    let page = Bytes.create 4 in
-    IO.read block ~off page >|= fun () ->
-    let n, v = Irmin.Type.(decode_bin int32) (Bytes.unsafe_to_string page) 0 in
-    assert (n = 4);
-    Int32.to_int v
-
   let append_string t v =
     let len = Int32.of_int (String.length v) in
     let buf = Irmin.Type.(to_bin_string int32 len) ^ v in
@@ -354,21 +347,23 @@ module Dict = struct
       (if fresh then IO.clear block else Lwt.return ()) >>= fun () ->
       let cache = Hashtbl.create 997 in
       let index = Hashtbl.create 997 in
-      let len = IO.offset block in
+      let len = Int64.to_int (IO.offset block) in
+      let raw = Bytes.create len in
+      IO.read block ~off:0L raw >>= fun () ->
+      let raw = Bytes.unsafe_to_string raw in
       let rec aux n offset =
         if offset >= len then Lwt.return ()
         else
-          read_length32 ~off:offset block >>= fun len ->
-          let v = Bytes.create len in
-          let off = offset ++ 4L in
-          IO.read block ~off v >>= fun () ->
-          let v = Bytes.unsafe_to_string v in
+          let _, v =
+            Irmin.Type.(decode_bin int32) (String.sub raw offset 4) 0
+          in
+          let len = Int32.to_int v in
+          let v = String.sub raw (offset + 4) len in
           Hashtbl.add cache v n;
           Hashtbl.add index n v;
-          let off = off ++ Int64.of_int (String.length v) in
-          aux (n + 1) off
+          aux (n + 1) (offset + 4 + len)
       in
-      aux 0 0L >|= fun () ->
+      aux 0 0 >|= fun () ->
       let t = { index; cache; block; lock = Lwt_mutex.create () } in
       Hashtbl.add files root t;
       t
