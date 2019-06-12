@@ -457,6 +457,28 @@ module Index (H : Irmin.Hash.S) = struct
 
   let index_path root = root // "store.index"
 
+  let map_io f io =
+    let max_offset = IO.offset io in
+    let rec aux offset =
+      if offset >= max_offset then Lwt.return ()
+      else
+        let raw = Bytes.create page_size in
+        IO.read io ~off:offset raw >>= fun () ->
+        let page = Bytes.unsafe_to_string raw in
+        let rec read_page page off =
+          if off = page_size then ()
+          else
+            let _, (hash, offset, len) =
+              Irmin.Type.decode_bin entry page off
+            in
+            f { hash; offset; len = Int32.to_int len };
+            read_page page (off + pad)
+        in
+        let () = read_page page 0 in
+        aux (offset ++ Int64.of_int page_size)
+    in
+    aux 0L
+
   let unsafe_v ?(fresh = false) root =
     let log_path = log_path root in
     let index_path = index_path root in
@@ -466,16 +488,25 @@ module Index (H : Irmin.Hash.S) = struct
       let t = Hashtbl.find files root in
       (if fresh then clear t else Lwt.return ()) >|= fun () -> t
     with Not_found ->
+      let entries = Bloomf.create ~error_rate:0.01 100_000_000 in
+      let cache = Tbl.create log_size in
       IO.v log_path >>= fun log ->
       array_init_lwt fan_out_size (fun i ->
           let index_path = Printf.sprintf "%s.%d" index_path i in
           IO.v index_path >>= fun index ->
-          (if fresh then IO.clear index else Lwt.return_unit) >|= fun () ->
-          index )
+          (if fresh then IO.clear index else Lwt.return_unit) >>= fun () ->
+          map_io (fun e -> Bloomf.add entries e.hash) index >|= fun () -> index
+      )
       >>= fun index ->
-      (if fresh then IO.clear log else Lwt.return ()) >|= fun () ->
+      (if fresh then IO.clear log else Lwt.return ()) >>= fun () ->
+      map_io
+        (fun e ->
+          Tbl.add cache e.hash e;
+          Bloomf.add entries e.hash )
+        log
+      >|= fun () ->
       let t =
-        { cache = Tbl.create log_size;
+        { cache;
           root;
           offsets = Hashtbl.create log_size;
           pages =
@@ -484,7 +515,7 @@ module Index (H : Irmin.Hash.S) = struct
           log;
           index;
           lock = Lwt_mutex.create ();
-          entries = Bloomf.create ~error_rate:0.01 100_000_000
+          entries
         }
       in
       Hashtbl.add files root t;
