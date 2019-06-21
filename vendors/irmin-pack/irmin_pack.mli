@@ -67,6 +67,8 @@ module type S = sig
 
   type hash
 
+  val hash : t -> hash
+
   val to_bin :
     dict:(string -> int Lwt.t) ->
     offset:(hash -> int64 option Lwt.t) ->
@@ -94,7 +96,7 @@ module Pack (K : Irmin.Hash.S) : sig
 
     val v : ?fresh:bool -> string -> [ `Read ] t Lwt.t
 
-    val find : 'a t -> K.t -> V.t option Lwt.t
+    val find : [> `Read ] t -> K.t -> V.t option Lwt.t
 
     val append : 'a t -> K.t -> V.t -> unit Lwt.t
   end

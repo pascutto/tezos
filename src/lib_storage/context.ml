@@ -55,11 +55,11 @@ end = struct
   let t =
     Irmin.Type.like ~cli:(pp, of_string) Irmin.Type.(string_of (`Fixed H.size))
 
-  let digest_size = H.size
+  let hash_size = H.size
 
-  let hash h = H.hash (H.of_string_exn h)
+  let short_hash h = H.hash (H.of_string_exn h)
 
-  let digest s = H.to_string (H.hash_string [s])
+  let hash s = H.to_string (H.hash_string [s])
 end
 
 module Node = struct
@@ -76,8 +76,8 @@ module Node = struct
 
     (* Irmin 1.4 uses int64 to store string lengths *)
     let step_t =
-      let pre_digest = Irmin.Type.(pre_digest (string_of `Int64)) in
-      Irmin.Type.like M.step_t ~pre_digest
+      let pre_hash = Irmin.Type.(pre_hash (string_of `Int64)) in
+      Irmin.Type.like M.step_t ~pre_hash
 
     let metadata_t =
       let some = "\255\000\000\000\000\000\000\000" in
@@ -119,16 +119,16 @@ module Node = struct
     let import t = List.map import_entry (M.list t)
 
     (* store the entries before hashing to be compatible with Tezos v1 *)
-    let pre_digest entries =
+    let pre_hash entries =
       let entries = List.fast_sort compare_entries entries in
-      Irmin.Type.pre_digest entries_t entries
+      Irmin.Type.pre_hash entries_t entries
   end
 
   include M
 
-  let pre_digest_v1 x = V1.pre_digest (V1.import x)
+  let pre_hash_v1 x = V1.pre_hash (V1.import x)
 
-  let t = Irmin.Type.(like t ~pre_digest:pre_digest_v1)
+  let t = Irmin.Type.(like t ~pre_hash:pre_hash_v1)
 end
 
 module Commit = struct
@@ -136,20 +136,20 @@ module Commit = struct
   module V1 = Irmin.Private.Commit.V1 (M)
   include M
 
-  let pre_digest_v1 t = Irmin.Type.pre_digest V1.t (V1.import t)
+  let pre_hash_v1 t = Irmin.Type.pre_hash V1.t (V1.import t)
 
-  let t = Irmin.Type.like t ~pre_digest:pre_digest_v1
+  let t = Irmin.Type.like t ~pre_hash:pre_hash_v1
 end
 
 module Contents = struct
   type t = MBytes.t
 
-  let pre_digest_v1 x =
+  let pre_hash_v1 x =
     let ty = Irmin.Type.(pair (string_of `Int64) unit) in
-    Irmin.Type.(pre_digest ty) (MBytes.to_string x, ())
+    Irmin.Type.(pre_hash ty) (MBytes.to_string x, ())
 
   let t =
-    Irmin.Type.(map ~pre_digest:pre_digest_v1 string)
+    Irmin.Type.(map ~pre_hash:pre_hash_v1 string)
       MBytes.of_string MBytes.to_string
 
   let merge = Irmin.Merge.(idempotent (Irmin.Type.option t))
@@ -219,7 +219,7 @@ let hash ~time ?(message = "") context =
   let parents = List.map (fun c -> Store.Commit.hash c) context.parents in
   let node = Store.Tree.hash context.tree in
   let commit = P.Commit.Val.v ~parents ~node ~info in
-  let x = P.Commit.Key.digest commit in
+  let x = P.Commit.Key.hash commit in
   Hash.to_context_hash x
 
 let commit ~time ?message context =
@@ -728,9 +728,7 @@ let validate_context_hash_consistency_and_commit
   Store.Tree.add_tree tree ["data"] data_tree >>= fun node ->
   let node = Store.Tree.hash node in
   let commit = P.Commit.Val.v ~parents ~node ~info in
-  let computed_context_hash =
-    Hash.to_context_hash (P.Commit.Key.digest commit)
-  in
+  let computed_context_hash = Hash.to_context_hash (P.Commit.Key.hash commit) in
   if Context_hash.equal expected_context_hash computed_context_hash then
     let ctxt =
       let parent = Store.of_private_commit index.repo commit in

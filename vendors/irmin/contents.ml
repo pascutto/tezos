@@ -262,14 +262,6 @@ module String = struct
   let merge = Merge.idempotent Type.(option string)
 end
 
-module Bytes = struct
-  type t = bytes
-
-  let t = Type.bytes
-
-  let merge = Merge.idempotent Type.(option t)
-end
-
 module type STORE = S.CONTENTS_STORE
 
 module Store (S : sig
@@ -280,7 +272,7 @@ module Store (S : sig
   module Val : S.CONTENTS with type t = value
 end) =
 struct
-  module Key = Hash.With_digest (S.Key) (S.Val)
+  module Key = Hash.With_hash (S.Key) (S.Val)
   module Val = S.Val
 
   type 'a t = 'a S.t
