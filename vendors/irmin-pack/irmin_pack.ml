@@ -1330,9 +1330,10 @@ struct
       end
 
       module Compress = struct
-        type name = Indirect of int | Direct of P.step
 
-        type address = Indirect of int64 | Direct of H.t
+        type name = Index of int | Step of P.step
+
+        type address = Offset of int64 | Hash of H.t
 
         type entry =
           | Contents of name * address * M.t
@@ -1345,34 +1346,34 @@ struct
             (fun contents_ii node_ii inode_i contents_id node_id inode_d
               contents_di node_di contents_dd node_dd  ->
             function
-            | Contents (Indirect n, Indirect h, m) -> contents_ii (n, h, m)
-            | Node (Indirect n, Indirect h) -> node_ii (n, h)
-            | Inode (n, Indirect h) -> inode_i (n, h)
-            | Contents (Indirect n, Direct h, m) -> contents_id (n, h, m)
-            | Node (Indirect n, Direct h) -> node_id (n, h)
-            | Inode (n, Direct h) -> inode_d (n, h)
-            | Contents (Direct n, Indirect h, m) -> contents_di (n, h, m)
-            | Node (Direct n, Indirect h) -> node_di (n, h)
-            | Contents (Direct n, Direct h, m) -> contents_dd (n, h, m)
-            | Node (Direct n, Direct h) -> node_dd (n, h))
+            | Contents (Index n, Offset h, m) -> contents_ii (n, h, m)
+            | Node (Index n, Offset h) -> node_ii (n, h)
+            | Inode (n, Offset h) -> inode_i (n, h)
+            | Contents (Index n, Hash h, m) -> contents_id (n, h, m)
+            | Node (Index n, Hash h) -> node_id (n, h)
+            | Inode (n, Hash h) -> inode_d (n, h)
+            | Contents (Step n, Offset h, m) -> contents_di (n, h, m)
+            | Node (Step n, Offset h) -> node_di (n, h)
+            | Contents (Step n, Hash h, m) -> contents_dd (n, h, m)
+            | Node (Step n, Hash h) -> node_dd (n, h))
           |~ case1 "contents-ii" (triple int int64 M.t) (fun (n, i, m) ->
-                 Contents (Indirect n, Indirect i, m) )
+                 Contents (Index n, Offset i, m) )
           |~ case1 "node-ii" (pair int int64) (fun (n, i) ->
-              Node (Indirect n, Indirect i))
+              Node (Index n, Offset i))
           |~ case1 "inode-i" (pair int int64) (fun (n, i) ->
-                 Inode (n, Indirect i) )
+                 Inode (n, Offset i) )
           |~ case1 "contents-id" (triple int H.t M.t) (fun (n, h, m) ->
-                 Contents (Indirect n, Direct h, m) )
-          |~ case1 "node-id" (pair int H.t) (fun (n, h) -> Node (Indirect n, Direct h))
-          |~ case1 "inode-d" (pair int H.t) (fun (n, h) -> Inode (n, Direct h))
+                 Contents (Index n, Hash h, m) )
+          |~ case1 "node-id" (pair int H.t) (fun (n, h) -> Node (Index n, Hash h))
+          |~ case1 "inode-d" (pair int H.t) (fun (n, h) -> Inode (n, Hash h))
           |~ case1 "contents-di" (triple P.step_t int64 M.t) (fun (n, i, m) ->
-                 Contents (Direct n, Indirect i, m) )
+                 Contents (Step n, Offset i, m) )
           |~ case1 "node-di" (pair P.step_t int64) (fun (n, i) ->
-              Node (Direct n, Indirect i))
+              Node (Step n, Offset i))
           |~ case1 "contents-dd" (triple P.step_t H.t M.t) (fun (n, i, m) ->
-                 Contents (Direct n, Direct i, m) )
+                 Contents (Step n, Hash i, m) )
           |~ case1 "node-dd" (pair P.step_t H.t) (fun (n, i) ->
-              Node (Direct n, Direct i))
+              Node (Step n, Hash i))
           |> sealv
 
         let t = Irmin.Type.(pair H.t (list entry))
@@ -1387,13 +1388,13 @@ struct
           assert (Irmin.Type.equal H.t k t.hash);
           let step s : Compress.name Lwt.t =
             let str = Irmin.Type.to_string P.step_t s in
-            if String.length str <= 4 then Lwt.return (Direct s : Compress.name)
-            else dict str >|= fun s -> (Indirect s : Compress.name)
+            if String.length str <= 4 then Lwt.return (Compress.Step s)
+            else dict str >|= fun s -> (Compress.Index s)
           in
           let hash h =
             offset h >|= function
-            | None -> Compress.Direct h
-            | Some off -> Compress.Indirect off
+            | None -> Compress.Hash h
+            | Some off -> Compress.Offset off
           in
           let inode : entry -> Compress.entry Lwt.t = function
             | Contents c ->
@@ -1415,8 +1416,8 @@ struct
             Irmin.Type.decode_bin ~headers:false Compress.t t off
           in
           let step : Compress.name -> P.step Lwt.t = function
-            | Direct n -> Lwt.return n
-            | Indirect s ->
+            | Step n -> Lwt.return n
+            | Index s ->
                 dict s >|= function
                 | None -> raise_notrace (Exit (`Msg "dict"))
                 | Some s -> (
@@ -1425,8 +1426,8 @@ struct
                     | Ok v -> v )
           in
           let hash : Compress.address -> H.t Lwt.t = function
-            | Indirect off -> hash off
-            | Direct n -> Lwt.return n
+            | Offset off -> hash off
+            | Hash n -> Lwt.return n
           in
           let inode : Compress.entry -> entry Lwt.t = function
             | Contents (n, h, metadata) ->
