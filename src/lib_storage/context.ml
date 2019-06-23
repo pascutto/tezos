@@ -195,7 +195,6 @@ let checkout index key =
   | None -> Lwt.return_none
   | Some commit ->
       let tree = Store.Commit.tree commit in
-      Store.Tree.clear tree;
       let ctxt = {index; tree; parents= [commit]} in
       Lwt.return_some ctxt
 
@@ -203,14 +202,30 @@ let checkout_exn index key =
   checkout index key
   >>= function None -> Lwt.fail Not_found | Some p -> Lwt.return p
 
+(* unshalow possible 1-st level objects from previous partial
+   checkouts ; might be better to pass directly the list of shallow
+   objects. *)
+let unshallow context =
+  Store.Tree.list context.tree [] >>= fun childs ->
+  P.Repo.batch context.index.repo (fun x y _ ->
+      Lwt_list.iter_s (fun (s, k) -> match k with
+          | `Contents -> Lwt.return ()
+          | `Node ->
+              Store.Tree.get_tree context.tree [s] >>= fun tree ->
+              Store.save_tree context.index.repo x y tree >|= fun _ ->
+              Store.Tree.clear tree;
+              ()
+        ) childs)
+
 let raw_commit ~time ?(message = "") context =
   let info =
     Irmin.Info.v ~date:(Time.Protocol.to_seconds time) ~author:"Tezos" message
   in
   let parents = List.map Store.Commit.hash context.parents in
-  (* empty the cache on commit *)
+  unshallow context >>= fun () ->
+  Store.Commit.v context.index.repo ~info ~parents context.tree >|= fun h ->
   Store.Tree.clear context.tree;
-  Store.Commit.v context.index.repo ~info ~parents context.tree
+  h
 
 let hash ~time ?(message = "") context =
   let info =
