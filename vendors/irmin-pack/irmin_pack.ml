@@ -231,6 +231,151 @@ module IO : IO = struct
         v ~offset raw
 end
 
+module Lru (H : Hashtbl.HashedType) = struct
+  (* Extracted from https://github.com/pqwy/lru
+     Copyright (c) 2016 David Kaloper Meršinjak *)
+
+  module HT = Hashtbl.Make (H)
+
+  module Q = struct
+    type 'a node = {
+      value : 'a;
+      mutable next : 'a node option;
+      mutable prev : 'a node option
+    }
+
+    type 'a t = {
+      mutable first : 'a node option;
+      mutable last : 'a node option
+    }
+
+    let clear t =
+      t.first <- None;
+      t.last <- None
+
+    let detach t n =
+      let np = n.prev and nn = n.next in
+      ( match np with
+      | None -> t.first <- nn
+      | Some x ->
+          x.next <- nn;
+          n.prev <- None );
+      match nn with
+      | None -> t.last <- np
+      | Some x ->
+          x.prev <- np;
+          n.next <- None
+
+    let append t n =
+      let on = Some n in
+      match t.last with
+      | Some x as l ->
+          x.next <- on;
+          t.last <- on;
+          n.prev <- l
+      | None ->
+          t.first <- on;
+          t.last <- on
+
+    let node x = { value = x; prev = None; next = None }
+
+    let create () = { first = None; last = None }
+  end
+
+  module M = struct
+    type key = HT.key
+
+    type 'a t = {
+      ht : (key * 'a) Q.node HT.t;
+      q : (key * 'a) Q.t;
+      mutable cap : int;
+      mutable w : int
+    }
+
+    let size t = HT.length t.ht
+
+    let weight t = t.w
+
+    let create cap = { cap; w = 0; ht = HT.create cap; q = Q.create () }
+
+    let drop_lru t =
+      match t.q.Q.first with
+      | None -> ()
+      | Some ({ Q.value = k, _; _ } as n) ->
+          t.w <- t.w - 1;
+          HT.remove t.ht k;
+          Q.detach t.q n
+
+    let rec trim t =
+      if weight t > t.cap then (
+        drop_lru t;
+        trim t )
+
+    let remove k t =
+      try
+        let n = HT.find t.ht k in
+        t.w <- t.w - 1;
+        HT.remove t.ht k;
+        Q.detach t.q n
+      with Not_found -> ()
+
+    let clear t =
+      HT.clear t.ht;
+      Q.clear t.q
+
+    let add k v t =
+      remove k t;
+      let n = Q.node (k, v) in
+      t.w <- t.w + 1;
+      HT.add t.ht k n;
+      Q.append t.q n
+
+    let promote k t =
+      try
+        let n = HT.find t.ht k in
+        Q.(
+          detach t.q n;
+          append t.q n)
+      with Not_found -> ()
+
+    let find k t =
+      try Some (snd (HT.find t.ht k).Q.value) with Not_found -> None
+  end
+
+  include M
+
+  let create x = M.create x
+
+  let length = M.size
+
+  let add t k v =
+    M.add k v t;
+    M.trim t
+
+  let find t k =
+    match M.find k t with
+    | None -> raise Not_found
+    | Some v ->
+        M.promote k t;
+        v
+end
+
+module Table (K : Irmin.Type.S) = Hashtbl.Make (struct
+  type t = K.t
+
+  let hash (t : t) = Irmin.Type.short_hash K.t t
+
+  let equal (x : t) (y : t) = Irmin.Type.equal K.t x y
+end)
+
+module Cache (K : Irmin.Type.S) = Lru (struct
+  type t = K.t
+
+  let hash (t : t) = Irmin.Type.short_hash K.t t
+
+  let equal (x : t) (y : t) = Irmin.Type.equal K.t x y
+end)
+
 module Pool : sig
   type t
 
@@ -240,19 +385,18 @@ module Pool : sig
 
   val clear : t -> unit
 end = struct
-  module Lru =
-    Lru.M.Make (struct
-        include Int64
+  module Lru = Lru (struct
+    include Int64
 
-        let hash = Hashtbl.hash
-      end)
-      (struct
-        type t = Bytes.t
+    let hash = Hashtbl.hash
+  end)
 
-        let weight _ = 1
-      end)
-
-  type t = { mutable pages : Lru.t; length : int; lru_size : int; io : IO.t }
+  type t = {
+    mutable pages : bytes Lru.t;
+    length : int;
+    lru_size : int;
+    io : IO.t
+  }
 
   let v ~length ~lru_size io =
     let pages = Lru.create lru_size in
@@ -262,14 +406,14 @@ end = struct
     let l = Int64.of_int t.length in
     let page_off = Int64.(mul (div off l) l) in
     let ioff = Int64.to_int (off -- page_off) in
-    match Lru.find page_off t.pages with
+    match Lru.M.find page_off t.pages with
     | Some buf ->
         if t.length - ioff < len then (
-          Lru.remove page_off t.pages;
+          Lru.M.remove page_off t.pages;
           (read [@tailcall]) t ~off ~len )
         else (
-          Lru.promote page_off t.pages;
-          Lru.trim t.pages;
+          Lru.M.promote page_off t.pages;
+          Lru.M.trim t.pages;
           (buf, ioff) )
     | None ->
         let length = max t.length (ioff + len) in
@@ -280,20 +424,12 @@ end = struct
         in
         let buf = Bytes.create length in
         IO.read t.io ~off:page_off buf;
-        Lru.add page_off buf t.pages;
-        Lru.trim t.pages;
+        Lru.M.add page_off buf t.pages;
+        Lru.M.trim t.pages;
         (buf, ioff)
 
-  let clear t = t.pages <- Lru.create t.lru_size
+  let clear t = Lru.M.clear t.pages
 end
-
-module Table (K : Irmin.Type.S) = Hashtbl.Make (struct
-  type t = K.t
-
-  let hash (t : t) = Irmin.Type.short_hash K.t t
-
-  let equal (x : t) (y : t) = Irmin.Type.equal K.t x y
-end)
 
 module Dict = struct
   type t = {
@@ -488,7 +624,7 @@ module Index (H : Irmin.Hash.S) = struct
       let t =
         { cache;
           root;
-          offsets = Hashtbl.create log_size;
+          offsets = Hashtbl.create 127;
           pages =
             Array.init fan_out_size (fun i ->
                 Pool.v ~length:page_size ~lru_size index.(i) );
@@ -755,11 +891,11 @@ module Pack (K : Irmin.Hash.S) = struct
 
     val append : 'a t -> K.t -> V.t -> unit Lwt.t
   end = struct
-    module Tbl = Table (K)
+    module Tbl = Cache (K)
 
     let lru_size = 30_000
 
-    let page_size = 1024
+    let page_size = 4 * 1024
 
     type nonrec 'a t = { pack : 'a t; cache : V.t Tbl.t; pages : Pool.t }
 
@@ -780,7 +916,7 @@ module Pack (K : Irmin.Hash.S) = struct
         (if fresh then clear t else Lwt.return ()) >|= fun () -> t
       with Not_found ->
         v ~fresh root >>= fun pack ->
-        let cache = Tbl.create (1024 * 1024) in
+        let cache = Tbl.create 10_000 in
         let t =
           { cache;
             pack;
@@ -846,8 +982,6 @@ module Pack (K : Irmin.Hash.S) = struct
         IO.sync t.pack.dict.block;
         IO.sync t.pack.index.log;
         IO.sync t.pack.block;
-        Tbl.clear t.cache;
-        (* would probably be better to just clear the last page *)
         Pool.clear t.pages;
         Lwt.return r )
 
