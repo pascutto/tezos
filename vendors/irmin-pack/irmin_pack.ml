@@ -14,8 +14,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-open Lwt.Infix
-
 let src = Logs.Src.create "irmin.pack" ~doc:"Irmin in-memory store"
 
 module Log = (val Logs.src_log src : Logs.LOG)
@@ -532,8 +530,7 @@ module Dict = struct
   type t = {
     cache : (string, int) Hashtbl.t;
     index : (int, string) Hashtbl.t;
-    block : IO.t;
-    lock : Lwt_mutex.t
+    block : IO.t
   }
 
   let append_string t v =
@@ -541,22 +538,20 @@ module Dict = struct
     let buf = Irmin.Type.(to_bin_string int32 len) ^ v in
     IO.append t.block buf
 
-  let unsafe_index t v =
+  let index t v =
     Log.debug (fun l -> l "[dict] index %S" v);
-    try Lwt.return (Hashtbl.find t.cache v)
+    try Hashtbl.find t.cache v
     with Not_found ->
       let id = Hashtbl.length t.cache in
       append_string t v;
       Hashtbl.add t.cache v id;
       Hashtbl.add t.index id v;
-      Lwt.return id
-
-  let index t v = Lwt_mutex.with_lock t.lock (fun () -> unsafe_index t v)
+      id
 
   let find t id =
     Log.debug (fun l -> l "[dict] find %d" id);
     let v = try Some (Hashtbl.find t.index id) with Not_found -> None in
-    Lwt.return v
+    v
 
   let clear t =
     IO.clear t.block;
@@ -565,9 +560,7 @@ module Dict = struct
 
   let files = Hashtbl.create 10
 
-  let create = Lwt_mutex.create ()
-
-  let unsafe_v ?(fresh = false) root =
+  let v ?(fresh = false) root =
     let root = root // "store.dict" in
     Log.debug (fun l -> l "[dict] v fresh=%b root=%s" fresh root);
     try
@@ -594,14 +587,9 @@ module Dict = struct
           (aux [@tailcall]) (n + 1) (offset + 4 + len) k
       in
       (aux [@tailcall]) 0 0 @@ fun () ->
-      let t = { index; cache; block; lock = Lwt_mutex.create () } in
+      let t = { index; cache; block } in
       Hashtbl.add files root t;
       t
-
-  let v ?fresh root =
-    Lwt_mutex.with_lock create (fun () ->
-        let t = unsafe_v ?fresh root in
-        Lwt.return t )
 end
 
 module Index (H : Irmin.Hash.S) = struct
@@ -647,8 +635,7 @@ module Index (H : Irmin.Hash.S) = struct
     log : IO.t;
     index : IO.t array;
     entries : H.t Bloomf.t;
-    root : string;
-    lock : Lwt_mutex.t
+    root : string
   }
 
   let clear t =
@@ -662,8 +649,6 @@ module Index (H : Irmin.Hash.S) = struct
     Hashtbl.clear t.offsets
 
   let files = Hashtbl.create 10
-
-  let create = Lwt_mutex.create ()
 
   let log_path root = root // "store.log"
 
@@ -691,7 +676,7 @@ module Index (H : Irmin.Hash.S) = struct
     in
     (aux [@tailcall]) 0L
 
-  let unsafe_v ?(fresh = false) root =
+  let v ?(fresh = false) root =
     let log_path = log_path root in
     let index_path = index_path root in
     Log.debug (fun l ->
@@ -727,17 +712,11 @@ module Index (H : Irmin.Hash.S) = struct
                 Pool.v ~length:page_size ~lru_size index.(i) );
           log;
           index;
-          lock = Lwt_mutex.create ();
           entries
         }
       in
       Hashtbl.add files root t;
       t
-
-  let v ?fresh root =
-    Lwt_mutex.with_lock create (fun () ->
-        let t = unsafe_v ?fresh root in
-        Lwt.return t )
 
   let get_entry t i off =
     let page, ioff = Pool.read t.pages.(i) ~off ~len:pad in
@@ -794,7 +773,7 @@ module Index (H : Irmin.Hash.S) = struct
 
   (*  let dump_entry ppf e = Fmt.pf ppf "[offset:%Ld len:%d]" e.offset e.len *)
 
-  let unsafe_find t key =
+  let find t key =
     Log.debug (fun l -> l "[index] find %a" pp_hash key);
     stats.index_finds <- succ stats.index_finds;
     if not (Bloomf.mem t.entries key) then (
@@ -807,14 +786,9 @@ module Index (H : Irmin.Hash.S) = struct
           let i = H.short_hash key land (fan_out_size - 1) in
           interpolation_search t i key
 
-  let find t key =
-    Lwt_mutex.with_lock t.lock (fun () ->
-        let v = unsafe_find t key in
-        Lwt.return v )
-
   let mem t key =
     stats.index_mems <- succ stats.index_mems;
-    find t key >|= function None -> false | Some _ -> true
+    match find t key with None -> false | Some _ -> true
 
   let append_entry t e = IO.append t (encode_entry e)
 
@@ -923,19 +897,17 @@ module type S = sig
   val hash : t -> hash
 
   val to_bin :
-    dict:(string -> int Lwt.t) ->
-    offset:(hash -> int64 option Lwt.t) ->
+    dict:(string -> int) ->
+    offset:(hash -> int64 option) ->
     t ->
     hash ->
-    string Lwt.t
+    string
 
   val decode_bin :
-    dict:(int -> string option Lwt.t) ->
-    hash:(int64 -> hash Lwt.t) ->
-    string ->
-    int ->
-    t Lwt.t
+    dict:(int -> string option) -> hash:(int64 -> hash) -> string -> int -> t
 end
+
+open Lwt.Infix
 
 module Pack (K : Irmin.Hash.S) = struct
   module Index = Index (K)
@@ -971,8 +943,8 @@ module Pack (K : Irmin.Hash.S) = struct
       t
     with Not_found ->
       let lock = Lwt_mutex.create () in
-      let index = Index.unsafe_v ~fresh root in
-      let dict = Dict.unsafe_v ~fresh root in
+      let index = Index.v ~fresh root in
+      let dict = Dict.v ~fresh root in
       let block = IO.v root_f in
       if fresh then IO.clear block;
       let t = { block; index; lock; dict } in
@@ -993,6 +965,10 @@ module Pack (K : Irmin.Hash.S) = struct
     val batch : [ `Read ] t -> ([ `Read | `Write ] t -> 'a Lwt.t) -> 'a Lwt.t
 
     val append : 'a t -> K.t -> V.t -> unit Lwt.t
+
+    val unsafe_append : 'a t -> K.t -> V.t -> unit
+
+    val unsafe_find : 'a t -> K.t -> V.t option
   end = struct
     module Tbl = Table (K)
     module Lru = Cache (K)
@@ -1043,18 +1019,23 @@ module Pack (K : Irmin.Hash.S) = struct
 
     let pp_hash = Irmin.Type.pp K.t
 
-    let mem t k =
+    let unsafe_mem t k =
       Log.debug (fun l -> l "[pack] mem %a" pp_hash k);
-      if Tbl.mem t.staging k then Lwt.return true
-      else if Lru.mem t.lru k then Lwt.return true
+      if Tbl.mem t.staging k then true
+      else if Lru.mem t.lru k then true
       else Index.mem t.pack.index k
+
+    let mem t k =
+      Lwt_mutex.with_lock create (fun () ->
+          let b = unsafe_mem t k in
+          Lwt.return b )
 
     let check_key k v =
       let k' = V.hash v in
-      if Irmin.Type.equal K.t k k' then Lwt.return ()
+      if Irmin.Type.equal K.t k k' then ()
       else
-        Fmt.kstrf Lwt.fail_invalid_arg "corrupted value: got %a, expecting %a."
-          pp_hash k' pp_hash k
+        Fmt.failwith "corrupted value: got %a, expecting %a." pp_hash k'
+          pp_hash k
 
     let unsafe_find t k =
       Log.debug (fun l -> l "[pack] find %a" pp_hash k);
@@ -1062,37 +1043,41 @@ module Pack (K : Irmin.Hash.S) = struct
       match Tbl.find t.staging k with
       | v ->
           Lru.add t.lru k v;
-          Lwt.return (Some v)
+          Some v
       | exception Not_found -> (
         match Lru.find t.lru k with
-        | v -> Lwt.return (Some v)
+        | v -> Some v
         | exception Not_found -> (
-            Index.find t.pack.index k >>= function
-            | None -> Lwt.return None
-            | Some e ->
-                let buf, pos = Pool.read t.pages ~off:e.offset ~len:e.len in
-                let hash off =
-                  match Hashtbl.find t.pack.index.offsets off with
-                  | e -> Lwt.return e.hash
-                  | exception Not_found ->
-                      let buf, pos = Pool.read t.pages ~off ~len:K.hash_size in
-                      let _, v =
-                        Irmin.Type.decode_bin ~headers:false K.t
-                          (Bytes.unsafe_to_string buf)
-                          pos
-                      in
-                      Lwt.return v
-                in
-                let dict = Dict.find t.pack.dict in
+          match Index.find t.pack.index k with
+          | None -> None
+          | Some e ->
+              let buf, pos = Pool.read t.pages ~off:e.offset ~len:e.len in
+              let hash off =
+                match Hashtbl.find t.pack.index.offsets off with
+                | e -> e.hash
+                | exception Not_found ->
+                    let buf, pos = Pool.read t.pages ~off ~len:K.hash_size in
+                    let _, v =
+                      Irmin.Type.decode_bin ~headers:false K.t
+                        (Bytes.unsafe_to_string buf)
+                        pos
+                    in
+                    v
+              in
+              let dict = Dict.find t.pack.dict in
+              let v =
                 V.decode_bin ~hash ~dict (Bytes.unsafe_to_string buf) pos
-                >>= fun v ->
-                check_key k v >|= fun () ->
-                Tbl.add t.staging k v;
-                Lru.add t.lru k v;
-                stats.pack_cache_misses <- succ stats.pack_cache_misses;
-                Some v ) )
+              in
+              check_key k v;
+              Tbl.add t.staging k v;
+              Lru.add t.lru k v;
+              stats.pack_cache_misses <- succ stats.pack_cache_misses;
+              Some v ) )
 
-    let find t k = Lwt_mutex.with_lock t.pack.lock (fun () -> unsafe_find t k)
+    let find t k =
+      Lwt_mutex.with_lock t.pack.lock (fun () ->
+          let v = unsafe_find t k in
+          Lwt.return v )
 
     let cast t = (t :> [ `Read | `Write ] t)
 
@@ -1114,27 +1099,28 @@ module Pack (K : Irmin.Hash.S) = struct
     let auto_flush = 1024
 
     let unsafe_append t k v =
-      mem t k >>= function
-      | true -> Lwt.return ()
+      match unsafe_mem t k with
+      | true -> ()
       | false ->
           Log.debug (fun l -> l "[pack] append %a" pp_hash k);
           let offset k =
-            Index.find t.pack.index k >|= function
+            match Index.find t.pack.index k with
             | Some e -> Some e.offset
             | None -> None
           in
           let dict = Dict.index t.pack.dict in
-          V.to_bin ~offset ~dict v k >>= fun buf ->
+          let buf = V.to_bin ~offset ~dict v k in
           let off = IO.offset t.pack.block in
           IO.append t.pack.block buf;
           Index.append t.pack.index k ~off ~len:(String.length buf);
           if Tbl.length t.staging >= auto_flush then flush t
           else Tbl.add t.staging k v;
-          Lru.add t.lru k v;
-          Lwt.return ()
+          Lru.add t.lru k v
 
     let append t k v =
-      Lwt_mutex.with_lock t.pack.lock (fun () -> unsafe_append t k v)
+      Lwt_mutex.with_lock t.pack.lock (fun () ->
+          unsafe_append t k v;
+          Lwt.return () )
 
     let add t v =
       let k = V.hash v in
@@ -1340,14 +1326,13 @@ struct
           let with_hash_t = Irmin.Type.(pair H.t Val.t)
 
           let to_bin ~dict:_ ~offset:_ t k =
-            let s = Irmin.Type.to_bin_string with_hash_t (k, t) in
-            Lwt.return s
+            Irmin.Type.to_bin_string with_hash_t (k, t)
 
           let decode_bin ~dict:_ ~hash:_ s off =
             let _, (_, t) =
               Irmin.Type.decode_bin ~headers:false with_hash_t s off
             in
-            Lwt.return t
+            t
         end)
       end
 
@@ -1659,63 +1644,72 @@ struct
 
         let to_bin ~dict ~offset (t : t) k =
           assert (Irmin.Type.equal H.t k t.hash);
-          let step s : Compress.name Lwt.t =
+          let step s : Compress.name =
             let str = Irmin.Type.to_string P.step_t s in
-            if String.length str <= 4 then Lwt.return (Direct s : Compress.name)
-            else dict str >|= fun s -> (Indirect s : Compress.name)
+            if String.length str <= 4 then Direct s
+            else
+              let s = dict str in
+              Indirect s
           in
-          let hash h =
-            offset h >|= function
+          let hash h : Compress.address =
+            match offset h with
             | None -> Compress.Direct h
             | Some off -> Compress.Indirect off
           in
-          let inode : entry -> Compress.entry Lwt.t = function
+          let inode : entry -> Compress.entry = function
             | Contents c ->
-                step c.name >>= fun s ->
-                hash c.node >|= fun v -> Compress.Contents (s, v, c.metadata)
+                let s = step c.name in
+                let v = hash c.node in
+                Compress.Contents (s, v, c.metadata)
             | Node n ->
-                step n.name >>= fun s ->
-                hash n.node >|= fun v -> Compress.Node (s, v)
-            | Inode i -> hash i.node >|= fun v -> Compress.Inode (i.index, v)
+                let s = step n.name in
+                let v = hash n.node in
+                Compress.Node (s, v)
+            | Inode i ->
+                let v = hash i.node in
+                Compress.Inode (i.index, v)
           in
-          Lwt_list.map_p inode t.entries >|= fun inodes ->
+          let inodes = List.map inode t.entries in
           let res = Irmin.Type.to_bin_string Compress.t (k, inodes) in
           res
 
         exception Exit of [ `Msg of string ]
 
-        let decode_bin ~dict ~hash t off : t Lwt.t =
+        let decode_bin ~dict ~hash t off : t =
           let _, (h, inodes) =
             Irmin.Type.decode_bin ~headers:false Compress.t t off
           in
-          let step : Compress.name -> P.step Lwt.t = function
-            | Direct n -> Lwt.return n
+          let step : Compress.name -> P.step = function
+            | Direct n -> n
             | Indirect s -> (
-                dict s >|= function
-                | None -> raise_notrace (Exit (`Msg "dict"))
-                | Some s -> (
-                  match Irmin.Type.of_bin_string P.step_t s with
-                  | Error e -> raise_notrace (Exit e)
-                  | Ok v -> v ) )
+              match dict s with
+              | None -> raise_notrace (Exit (`Msg "dict"))
+              | Some s -> (
+                match Irmin.Type.of_bin_string P.step_t s with
+                | Error e -> raise_notrace (Exit e)
+                | Ok v -> v ) )
           in
-          let hash : Compress.address -> H.t Lwt.t = function
+          let hash : Compress.address -> H.t = function
             | Indirect off -> hash off
-            | Direct n -> Lwt.return n
+            | Direct n -> n
           in
-          let inode : Compress.entry -> entry Lwt.t = function
+          let inode : Compress.entry -> entry = function
             | Contents (n, h, metadata) ->
-                step n >>= fun name ->
-                hash h >|= fun node -> Contents { name; node; metadata }
+                let name = step n in
+                let node = hash h in
+                Contents { name; node; metadata }
             | Node (n, h) ->
-                step n >>= fun name ->
-                hash h >|= fun node -> Node { name; node }
-            | Inode (index, h) -> hash h >|= fun node -> Inode { index; node }
+                let name = step n in
+                let node = hash h in
+                Node { name; node }
+            | Inode (index, h) ->
+                let node = hash h in
+                Inode { index; node }
           in
-          Lwt.catch
-            (fun () ->
-              Lwt_list.map_p inode inodes >|= fun entries ->
-              { hash = h; entries } )
-            (function Exit (`Msg e) -> Lwt.fail_with e | e -> Lwt.fail e)
+          try
+            let entries = List.map inode inodes in
+            { hash = h; entries }
+          with Exit (`Msg e) -> failwith e
       end)
     end
 
@@ -1733,14 +1727,23 @@ struct
         let mem t k = Inode.mem t k
 
         let find t k =
-          Inode.Tree.load ~find:(Inode.find t) k >|= function
+          Inode.Tree.load
+            ~find:(fun k ->
+              let v = Inode.unsafe_find t k in
+              Lwt.return v )
+            k
+          >|= function
           | None -> None
           | Some t -> Some (Val.v (Inode.Tree.list t))
 
         let add t v =
           let n = Val.list v in
           let v = Inode.Tree.v n in
-          Inode.Tree.save ~add:(Inode.append t) v
+          Inode.Tree.save
+            ~add:(fun k v ->
+              Inode.unsafe_append t k v;
+              Lwt.return () )
+            v
 
         let batch = Inode.batch
 
@@ -1763,13 +1766,13 @@ struct
           let with_hash_t = Irmin.Type.(pair H.t Val.t)
 
           let to_bin ~dict:_ ~offset:_ t k =
-            Lwt.return (Irmin.Type.to_bin_string with_hash_t (k, t))
+            Irmin.Type.to_bin_string with_hash_t (k, t)
 
           let decode_bin ~dict:_ ~hash:_ s off =
             let _, (_, v) =
               Irmin.Type.decode_bin ~headers:false with_hash_t s off
             in
-            Lwt.return v
+            v
         end)
       end
 
