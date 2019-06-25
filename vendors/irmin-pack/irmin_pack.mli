@@ -16,9 +16,17 @@
 
 val config : ?fresh:bool -> string -> Irmin.config
 
+type stats_report = {
+  bf_misses : float;
+  pack_page_faults : float;
+  index_page_faults : float;
+  pack_cache_misses : float;
+  search_steps : float
+}
+
 val reset_stats : unit -> unit
 
-val dump_stats : unit -> unit
+val report : unit -> stats_report
 
 module Make_ext
     (Metadata : Irmin.Metadata.S)

@@ -407,7 +407,7 @@ let reconstruct_contexts ~context_root
   let rec reconstruct_chunks level =
     Store.with_atomic_rw store begin fun () ->
     let t0 = Unix.gettimeofday () in
-      Fmt.epr "# time, level, dict, index, pack, mem\n%!";
+      Fmt.epr "# time, level, dict, index, pack, mem, bf_misses, pack_page_faults, index_page_faults, pack_cache_misses, search_steps\n%!";
       let rec reconstruct_chunks level =
         if level mod 10 = 0 then (
           let gc = (* in MiB *)
@@ -434,11 +434,17 @@ let reconstruct_contexts ~context_root
             file (Filename.concat context_root "store.pack") / 1024 / 1024 in
           let time = (* in seconds *)
             int_of_float (Unix.gettimeofday () -. t0) in
-          Fmt.epr "%d, %d, %d, %d, %d, %d\n%!"
+          let stats_report = Irmin_pack.report () in
+          Fmt.epr "%d, %d, %d, %d, %d, %d, %f, %f, %f, %f, %f\n%!"
             time
             level
             dict index pack
-            gc;
+            gc
+            stats_report.bf_misses
+            stats_report.pack_page_faults
+            stats_report.index_page_faults
+            stats_report.pack_cache_misses
+            stats_report.search_steps
         );
         if level = limit then
           return level
