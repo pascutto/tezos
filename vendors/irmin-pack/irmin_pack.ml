@@ -609,8 +609,13 @@ module Index (H : Irmin.Hash.S) = struct
 
   let pad = H.hash_size + offset_size + length_size
 
-  (* last allowed offset *)
-  let log_size = 500_000 * pad
+  let lru_size = 3_000
+
+  let page_size = 10_000 * pad
+
+  let fan_out_size = 256
+
+  let log_size = 500_000 * pad / fan_out_size
 
   let log_sizeL = Int64.of_int log_size
 
@@ -628,30 +633,26 @@ module Index (H : Irmin.Hash.S) = struct
 
   module Tbl = Table (H)
 
-  let lru_size = 3_000
-
-  let page_size = 10_000 * pad
-
-  let fan_out_size = 256
-
   type t = {
-    cache : entry Tbl.t;
     pages : Pool.t array;
     offsets : (int64, entry) Hashtbl.t;
-    log : IO.t;
+    log_sizes : int64 array;
+    log_mem : entry Tbl.t array;
+    log : IO.t array;
     index : IO.t array;
     entries : H.t Bloomf.t;
     root : string
   }
 
   let clear t =
-    IO.clear t.log;
     let (_ : unit list) =
-      List.init (Array.length t.index) (fun i -> IO.clear t.index.(i))
+      List.init fan_out_size (fun i ->
+          IO.clear t.index.(i);
+          IO.clear t.log.(i);
+          Tbl.clear t.log_mem.(i) )
     in
     Bloomf.clear t.entries;
     Array.iter (fun p -> Pool.clear p) t.pages;
-    Tbl.clear t.cache;
     Hashtbl.clear t.offsets
 
   let files = Hashtbl.create 10
@@ -683,6 +684,14 @@ module Index (H : Irmin.Hash.S) = struct
     in
     (aux [@tailcall]) 0L
 
+  let startup_list_read path bf fresh =
+    Array.init fan_out_size (fun i ->
+        let log_path = Printf.sprintf "%s.%d" path i in
+        let log = IO.v log_path in
+        if fresh then IO.clear log;
+        map_io (fun e -> Bloomf.add bf e.hash) log;
+        log )
+
   let v ?(fresh = false) root =
     let log_path = log_path root in
     let index_path = index_path root in
@@ -694,29 +703,24 @@ module Index (H : Irmin.Hash.S) = struct
       t
     with Not_found ->
       let entries = Bloomf.create ~error_rate:0.01 100_000_000 in
-      let cache = Tbl.create log_size in
-      let log = IO.v log_path in
-      let index =
-        Array.init fan_out_size (fun i ->
-            let index_path = Printf.sprintf "%s.%d" index_path i in
-            let index = IO.v index_path in
-            if fresh then IO.clear index;
-            map_io (fun e -> Bloomf.add entries e.hash) index;
-            index )
+      let log_mem = Array.init fan_out_size (fun _ -> Tbl.create 0) in
+      let log = startup_list_read log_path entries fresh in
+      let index = startup_list_read index_path entries fresh in
+      let log_size10 = Int64.div log_sizeL 10L in
+      let log_size20 = Int64.div log_sizeL 5L in
+      let log_sizes =
+        Array.init fan_out_size (fun _ ->
+            let r = (Random.int64 log_size20) -- log_size10 in
+            log_sizeL ++ r )
       in
-      if fresh then IO.clear log;
-      map_io
-        (fun e ->
-          Tbl.add cache e.hash e;
-          Bloomf.add entries e.hash )
-        log;
       let t =
-        { cache;
-          root;
+        { root;
           offsets = Hashtbl.create 127;
           pages =
             Array.init fan_out_size (fun i ->
                 Pool.v ~length:page_size ~lru_size index.(i) );
+          log_sizes;
+          log_mem;
           log;
           index;
           entries
@@ -787,11 +791,10 @@ module Index (H : Irmin.Hash.S) = struct
       stats.index_bloomf_mems <- succ stats.index_bloomf_mems;
       None )
     else
-      match Tbl.find t.cache key with
+      let i = H.short_hash key land (fan_out_size - 1) in
+      match Tbl.find t.log_mem.(i) key with
       | e -> Some e
-      | exception Not_found ->
-          let i = H.short_hash key land (fan_out_size - 1) in
-          interpolation_search t i key
+      | exception Not_found -> interpolation_search t i key
 
   let mem t key =
     stats.index_mems <- succ stats.index_mems;
@@ -805,19 +808,12 @@ module Index (H : Irmin.Hash.S) = struct
     let compare a b = compare (H.short_hash a) (H.short_hash b)
   end)
 
-  let fan_out_cache t n =
-    let caches = Array.make n [] in
-    Tbl.iter
-      (fun k v ->
-        let index = H.short_hash k land (n - 1) in
-        caches.(index) <- (k, v) :: caches.(index) )
-      t.cache;
-    Array.map
-      (List.sort (fun (k, _) (k', _) ->
-           compare (H.short_hash k) (H.short_hash k') ))
-      caches
-
-  let merge_with log t i tmp =
+  let merge_with t i tmp =
+    let log =
+      Tbl.fold (fun h e acc -> (h, e) :: acc) t.log_mem.(i) []
+      |> List.sort (fun (h1, _) (h2, _) ->
+             compare (H.short_hash h1) (H.short_hash h2) )
+    in
     let offset = ref 0L in
     let get_index_entry = function
       | Some e -> Some e
@@ -875,20 +871,14 @@ module Index (H : Irmin.Hash.S) = struct
     in
     (go [@tailcall]) None log
 
-  let merge t =
-    IO.sync t.log;
-    let log = fan_out_cache t fan_out_size in
-    let tmp_path = t.root // "store.index.tmp" in
-    let (_ : unit list) =
-      List.init fan_out_size (fun i ->
-          let tmp_path = Format.sprintf "%s.%d" tmp_path i in
-          let tmp = IO.v tmp_path in
-          merge_with log.(i) t i tmp;
-          IO.rename ~src:tmp ~dst:t.index.(i) )
-    in
+  let merge t i =
+    let tmp_path = Format.sprintf "%s.%d" (t.root // "store.index.tmp") i in
+    let tmp = IO.v tmp_path in
+    merge_with t i tmp;
+    IO.rename ~src:tmp ~dst:t.index.(i);
     (* reset the log *)
-    IO.clear t.log;
-    Tbl.clear t.cache;
+    IO.clear t.log.(i);
+    Tbl.clear t.log_mem.(i);
     Array.iter (fun p -> Pool.clear p) t.pages;
     Hashtbl.clear t.offsets
 
@@ -898,11 +888,17 @@ module Index (H : Irmin.Hash.S) = struct
         l "[index] append %a off=%Ld len=%d" pp_hash key off len );
     stats.index_appends <- succ stats.index_appends;
     let entry = { hash = key; offset = off; len } in
-    append_entry t.log entry;
-    Tbl.add t.cache key entry;
+    let i = H.short_hash key land (fan_out_size - 1) in
+    append_entry t.log.(i) entry;
+    Tbl.add t.log_mem.(i) key entry;
     Hashtbl.add t.offsets entry.offset entry;
     Bloomf.add t.entries key;
-    if Int64.compare (IO.offset t.log) log_sizeL > 0 then merge t
+    if
+      Int64.compare
+        (IO.offset t.log.(i))
+        (t.log_sizes.(i))
+      > 0
+    then merge t i
 end
 
 module type S = sig
@@ -1099,7 +1095,7 @@ module Pack (K : Irmin.Hash.S) = struct
 
     let flush t =
       IO.sync t.pack.dict.block;
-      IO.sync t.pack.index.log;
+      Array.iter IO.sync t.pack.index.log;
       let off = IO.offset t.pack.block in
       Pool.trim ~off t.pages;
       IO.sync t.pack.block;
