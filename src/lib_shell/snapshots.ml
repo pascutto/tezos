@@ -491,7 +491,10 @@ let import ~data_dir ~dir_cleaner ~patch_context ~genesis filename block =
        in
        (* Restore context and fetch data *)
        restore_contexts
-         context_index store ~filename k_store_pruned_block block_validation >>=?
+         context_index store ~filename
+         k_store_pruned_block
+         block_validation
+       >>=?
        fun (predecessor_block_header, meta, history_mode, oldest_header_opt,
             rev_block_hashes, protocol_data) ->
        let oldest_header = Option.unopt_assert ~loc:__POS__ oldest_header_opt in
