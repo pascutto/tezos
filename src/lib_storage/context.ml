@@ -857,3 +857,5 @@ let restore_contexts idx store ~filename
        else fail @@ Suspicious_file (total - current)
     )
     (fun () -> Lwt_unix.close fd)
+
+module Irmin = Store

@@ -194,3 +194,6 @@ val validate_context_hash_consistency_and_commit :
   parents:Context_hash.t list ->
   index:index ->
   bool Lwt.t
+
+module Irmin : Irmin.KV with type contents = string and type metadata = unit
+(** The raw Irmin database *)
