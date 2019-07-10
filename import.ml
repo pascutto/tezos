@@ -26,8 +26,8 @@ module Node = struct
     Irmin.Type.(map (string_of (`Fixed 8)))
       (fun s ->
          match s.[0] with
-         | '\255' -> None
-         | '\000' -> Some ()
+         | '\255' -> Some ()
+         | '\000' -> None
          | _ -> assert false )
       (function Some _ -> some | None -> none)
 
