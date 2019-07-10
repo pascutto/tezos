@@ -11,7 +11,7 @@ module Node = struct
 
   module Hash = Irmin.Hash.V1 (P.Hash)
 
-  type kind = [`Node | `Contents of Store.Metadata.t]
+  type kind = [`Node | `Contents]
 
   type entry = {key: string Lazy.t; kind: kind; name: M.step; node: Hash.t}
 
@@ -35,16 +35,16 @@ module Node = struct
   let entry_t : entry Irmin.Type.t =
     let open Irmin.Type in
     record "Tree.entry" (fun kind name node ->
-        let kind = match kind with None -> `Node | Some m -> `Contents m in
+        let kind = match kind with None -> `Node | Some () -> `Contents in
         let key =
           match kind with
           | `Node -> lazy (name ^ "/")
-          | `Contents _ -> lazy name
+          | `Contents -> lazy name
         in
         {key; kind; name; node} )
     |+ field "kind" metadata_t (function
         | {kind= `Node; _} -> None
-        | {kind= `Contents m; _} -> Some m )
+        | {kind= `Contents; _} -> Some () )
     |+ field "name" step_t (fun {name; _} -> name)
     |+ field "node" Hash.t (fun {node; _} -> node)
     |> sealr
@@ -55,7 +55,7 @@ module Node = struct
 
   let export_entry e = match e.kind with
     | `Node -> e.name, `Node e.node
-    | `Contents m -> e.name, `Contents (e.node, m)
+    | `Contents -> e.name, `Contents (e.node, ())
 
   let export (t:t) = P.Node.Val.v (List.map export_entry t)
 end
