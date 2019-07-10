@@ -93,27 +93,52 @@ let pp_stats ppf () =
     (!contents / 1000) (!nodes / 1000) (!commits / 1000)
 
 let classify k =
-  match Astring.String.cut ~sep:"/" (Bigstring.to_string k) with
-  | Some ("commit", key) -> incr commits; `Commit (hash_of_string key)
-  | Some ("contents", key) -> incr contents; `Contents (hash_of_string key)
-  | Some ("node",key) -> incr nodes; `Node (hash_of_string key)
+  match Astring.String.cut ~sep:"/" k with
+  | Some ("commit", key) -> `Commit (hash_of_string key)
+  | Some ("contents", key) -> `Contents (hash_of_string key)
+  | Some ("node",key) -> `Node (hash_of_string key)
   | _ -> failwith "invalid key"
 
 let skip _ = Lwt.return ()
 
-let append x y z k v =
+let key_of_entry e =
+  let hash = Irmin.Type.to_bin_string Store.Hash.t Node.(e.node) in
+  assert (String.length hash = 32);
+  match Node.(e.kind) with
+  | `Node -> "node/" ^ hash
+  | `Contents -> "contents/" ^ hash
+
+let rec append (db, txn) x y z k v =
   let v = Bigstring.to_string v in
   match classify k with
   | `Contents k ->
+      incr contents;
       P.Contents.unsafe_add x k (contents_of_string v)
-  | `Node k ->
-      let n = node_of_string v in
-      let n = Node.export n in
-      P.Node.unsafe_add y k n
   | `Commit k ->
       let c = commit_of_string v in
       let c = Commit.export c in
+      incr commits;
       P.Commit.unsafe_add z k c
+  | `Node k ->
+      P.Node.mem y k >>= function
+      | true -> Lwt.return ()
+      | false ->
+          let n = node_of_string v in
+          Lwt_list.iter_s (fun e ->
+              P.Node.mem y Node.(e.node) >>= function
+              | true -> Lwt.return ()
+              | false ->
+                  let k = key_of_entry e in
+                  match Lmdb.get txn db k with
+                  | Ok v    -> (append[@tailcall]) (db, txn) x y z k v
+                  | Error e ->
+                      Fmt.epr "\n[error] %S: %a\n%!" k Lmdb.pp_error e;
+                      assert false
+            ) n
+          >>= fun () ->
+          let n = Node.export n in
+          incr nodes;
+          P.Node.unsafe_add y k n
 
 let move ~src:(db, txn) ~dst:repo =
   let count = ref 0 in
@@ -123,7 +148,8 @@ let move ~src:(db, txn) ~dst:repo =
       Lmdb.cursor_fold_left c ~init:() ~f:(fun () (key, value) ->
           incr count;
           if !count mod 100 = 0 then Fmt.epr "\r%a%!" pp_stats ();
-          Lwt.async (fun () -> append x y z key value);
+          Lwt.async (fun () ->
+              append (db, txn) x y z (Bigstring.to_string key) value);
           Ok ()
         ) >>* fun () ->
       Lwt.return ()
