@@ -459,3 +459,27 @@ module Make (K : Key) (V : Value) (IO : IO) = struct
 
   let flush t = IO.sync t.log
 end
+
+let reporter ?(prefix = "") () =
+  let report src level ~over k msgf =
+    let k _ =
+      over ();
+      k ()
+    in
+    let ppf = match level with Logs.App -> Fmt.stdout | _ -> Fmt.stderr in
+    let with_stamp h _tags k fmt =
+      let dt = Unix.gettimeofday () in
+      Fmt.kpf k ppf
+        ("%s%+04.0fus %a %a @[" ^^ fmt ^^ "@]@.")
+        prefix dt
+        Fmt.(styled `Magenta string)
+        (Logs.Src.name src)
+        Logs_fmt.pp_header (level, h)
+    in
+    msgf @@ fun ?header ?tags fmt -> with_stamp header tags k fmt
+  in
+  { Logs.report }
+
+let () =
+  Logs.set_level (Some Logs.Debug);
+  Logs.set_reporter (reporter ())
