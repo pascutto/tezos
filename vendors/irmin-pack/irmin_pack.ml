@@ -110,7 +110,7 @@ module Atomic_write (K : Irmin.Type.S) (V : Irmin.Hash.S) = struct
     block : IO.t;
     lock : Lwt_mutex.t;
     w : W.t;
-    mutable counter : int;
+    mutable open_instances : int;
   }
 
   let read_length32 ~off block =
@@ -170,8 +170,7 @@ module Atomic_write (K : Irmin.Type.S) (V : Irmin.Hash.S) = struct
   let unsafe_find t k =
     Log.debug (fun l -> l "[branches] find %a" pp_branch k);
     if IO.readonly t.block then sync_offset t;
-    try Lwt.return_some (Tbl.find t.cache k)
-    with Not_found -> Lwt.return_none
+    try Lwt.return_some (Tbl.find t.cache k) with Not_found -> Lwt.return_none
 
   let find t k = Lwt_mutex.with_lock t.lock (fun () -> unsafe_find t k)
 
@@ -196,18 +195,23 @@ module Atomic_write (K : Irmin.Type.S) (V : Irmin.Hash.S) = struct
     >>= fun () -> W.notify t.w k None
 
   let unsafe_clear t =
-    Lwt.async (fun () -> W.clear t.w);
     IO.clear t.block;
     Tbl.clear t.cache;
     Tbl.clear t.index
+
+  let clear t =
+    Log.debug (fun l -> l "[branches] clear");
+    Lwt_mutex.with_lock t.lock (fun () ->
+        unsafe_clear t;
+        Lwt.return_unit)
 
   let create = Lwt_mutex.create ()
 
   let watches = W.v ()
 
   let valid t =
-    if t.counter <> 0 then (
-      t.counter <- t.counter + 1;
+    if t.open_instances <> 0 then (
+      t.open_instances <- t.open_instances + 1;
       true )
     else false
 
@@ -222,7 +226,7 @@ module Atomic_write (K : Irmin.Type.S) (V : Irmin.Hash.S) = struct
         block;
         w = watches;
         lock = Lwt_mutex.create ();
-        counter = 1;
+        open_instances = 1;
       }
     in
     refill t ~from:0L;
@@ -284,8 +288,8 @@ module Atomic_write (K : Irmin.Type.S) (V : Irmin.Hash.S) = struct
   let unwatch t = W.unwatch t.w
 
   let unsafe_close t =
-    t.counter <- t.counter - 1;
-    if t.counter = 0 then (
+    t.open_instances <- t.open_instances - 1;
+    if t.open_instances = 0 then (
       Tbl.reset t.index;
       Tbl.reset t.cache;
       if not (IO.readonly t.block) then IO.sync t.block;
@@ -438,8 +442,7 @@ struct
         let readonly = readonly config in
         let log_size = index_log_size config in
         let index = Index.v ~fresh ~readonly ~log_size root in
-        Contents.CA.v ~fresh ~readonly ~lru_size ~index root
-        >>= fun contents ->
+        Contents.CA.v ~fresh ~readonly ~lru_size ~index root >>= fun contents ->
         Node.CA.v ~fresh ~readonly ~lru_size ~index root >>= fun node ->
         Commit.CA.v ~fresh ~readonly ~lru_size ~index root >>= fun commit ->
         Branch.v ~fresh ~readonly root >|= fun branch ->
@@ -450,6 +453,12 @@ struct
         Contents.CA.close (contents_t t) >>= fun () ->
         Node.CA.close (snd (node_t t)) >>= fun () ->
         Commit.CA.close (snd (commit_t t)) >>= fun () -> Branch.close t.branch
+
+      let clear t =
+        Index.clear t.index;
+        Contents.CA.clear (contents_t t) >>= fun () ->
+        Node.CA.clear (snd (node_t t)) >>= fun () ->
+        Commit.CA.clear (snd (commit_t t)) >>= fun () -> Branch.clear t.branch
     end
   end
 
@@ -508,3 +517,16 @@ end
 
 module KV (Config : CONFIG) (C : Irmin.Contents.S) =
   Make (Config) (Metadata) (C) (Path) (Irmin.Branch.String) (Hash)
+
+module Make_layered
+    (Layered_Config : Irmin.LAYERED_CONF)
+    (Config : CONFIG)
+    (M : Irmin.Metadata.S)
+    (C : Irmin.Contents.S)
+    (P : Irmin.Path.S)
+    (B : Irmin.Branch.S)
+    (H : Irmin.Hash.S) =
+struct
+  module Make = Make (Config)
+  include Irmin.Make_layered (Layered_Config) (Make) (M) (C) (P) (B) (H)
+end

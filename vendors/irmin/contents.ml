@@ -159,8 +159,7 @@ module Json_value = struct
     | None, `Null, `Null -> Merge.ok `Null
     | Some (`Float old), `Float a, `Float b ->
         merge_float ~old:(fun () -> Merge.ok (Some old)) a b
-    | None, `Float a, `Float b ->
-        merge_float ~old:(fun () -> Merge.ok None) a b
+    | None, `Float a, `Float b -> merge_float ~old:(fun () -> Merge.ok None) a b
     | Some (`String old), `String a, `String b ->
         merge_string ~old:(fun () -> Merge.ok (Some old)) a b
     | None, `String a, `String b ->
@@ -289,6 +288,8 @@ struct
   let unsafe_add = S.unsafe_add
 
   let mem = S.mem
+
+  let clear = S.clear
 
   let read_opt t = function None -> Lwt.return_none | Some k -> find t k
 

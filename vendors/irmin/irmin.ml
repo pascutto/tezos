@@ -100,6 +100,10 @@ functor
       else (
         t.closed := true;
         S.close t.t )
+
+    let clear t =
+      check_not_closed t;
+      S.clear t.t
   end
 
 module AW_check_closed (AW : S.ATOMIC_WRITE_STORE_MAKER) :
@@ -164,6 +168,10 @@ functor
       else (
         t.closed := true;
         S.close t.t )
+
+    let clear t =
+      check_not_closed t;
+      S.clear t.t
   end
 
 module Make_ext
@@ -264,6 +272,11 @@ struct
         Contents.CA.close t.contents >>= fun () ->
         Node.CA.close (snd t.nodes) >>= fun () ->
         Commit.CA.close (snd t.commits) >>= fun () -> Branch.close t.branch
+
+      let clear t =
+        Contents.CA.clear t.contents >>= fun () ->
+        Node.CA.clear (snd t.nodes) >>= fun () ->
+        Commit.CA.clear (snd t.commits) >>= fun () -> Branch.clear t.branch
     end
   end
 
@@ -282,6 +295,39 @@ struct
   module N = Node.Make (H) (P) (M)
   module CT = Commit.Make (H)
   include Make_ext (CA) (AW) (M) (C) (P) (B) (H) (N) (CT)
+end
+
+module type L_MAKER = functor
+  (M : S.METADATA)
+  (C : S.CONTENTS)
+  (P : S.PATH)
+  (B : S.BRANCH)
+  (H : S.HASH)
+  ->
+  Layer.STORE
+    with type step = P.step
+     and type contents = C.t
+     and type key = P.t
+     and type branch = B.t
+     and type metadata = M.t
+     and type hash = H.t
+
+module type LAYERED_STORE = Layer.STORE
+
+module type LAYERED_CONF = Layer.CONF
+
+module Make_layered
+    (Conf : Layer.CONF)
+    (Make : S.MAKER)
+    (M : S.METADATA)
+    (C : S.CONTENTS)
+    (P : S.PATH)
+    (B : S.BRANCH)
+    (H : S.HASH) =
+struct
+  module L = Make (M) (C) (P) (B) (H)
+  module U = Make (M) (C) (P) (B) (H)
+  include Layer.Make (Conf) (L) (U)
 end
 
 module Of_private = Store.Make

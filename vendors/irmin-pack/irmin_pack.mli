@@ -78,6 +78,22 @@ module Make
   val integrity_check : Format.formatter -> repo -> unit
 end
 
+module Make_layered
+    (Layered_Config : Irmin.LAYERED_CONF)
+    (Config : CONFIG)
+    (M : Irmin.Metadata.S)
+    (C : Irmin.Contents.S)
+    (P : Irmin.Path.S)
+    (B : Irmin.Branch.S)
+    (H : Irmin.Hash.S) :
+  Irmin.LAYERED_STORE
+    with type key = P.t
+     and type step = P.step
+     and type metadata = M.t
+     and type contents = C.t
+     and type branch = B.t
+     and type hash = H.t
+
 module KV (Config : CONFIG) : Irmin.KV_MAKER
 
 module Atomic_write (K : Irmin.Type.S) (V : Irmin.Hash.S) : sig

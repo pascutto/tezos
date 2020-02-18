@@ -43,6 +43,8 @@ module type S = sig
   val integrity_check : offset:int64 -> length:int -> key -> 'a t -> unit
 
   val close : 'a t -> unit Lwt.t
+
+  val clear : 'a t -> unit Lwt.t
 end
 
 module type CONFIG = sig
@@ -155,7 +157,8 @@ struct
         |+ field "hash" H.t (fun t -> Lazy.force t.hash)
         |+ field "stable" bool (fun t -> t.stable)
         |+ field "v" v_t (fun t -> t.v)
-        |> sealr |> like ~pre_hash
+        |> sealr
+        |> like ~pre_hash
 
       let node ~hash v = { stable = true; hash; v }
 
@@ -241,8 +244,8 @@ struct
           | Node (Direct n, Direct h) -> node_dd (n, h))
         |~ case1 "contents-ii" (pair int int64) (fun (n, i) ->
                Contents (Indirect n, Indirect i, T.default))
-        |~ case1 "contents-x-ii" (triple int int64 metadata_t)
-             (fun (n, i, m) -> Contents (Indirect n, Indirect i, m))
+        |~ case1 "contents-x-ii" (triple int int64 metadata_t) (fun (n, i, m) ->
+               Contents (Indirect n, Indirect i, m))
         |~ case1 "node-ii" (pair int int64) (fun (n, i) ->
                Node (Indirect n, Indirect i))
         |~ case1 "contents-id" (pair int H.t) (fun (n, h) ->
@@ -322,7 +325,8 @@ struct
         record "Node.inode" (fun hash tree -> { i_hash = lazy hash; tree })
         |+ field "hash" hash_t (fun t -> Lazy.force t.i_hash)
         |+ field "tree" (option t) (fun t -> t.tree)
-        |> sealr |> like ~equal:same_hash
+        |> sealr
+        |> like ~equal:same_hash
 
       let entry_t inode : entry Irmin.Type.t =
         let open Irmin.Type in
@@ -359,7 +363,11 @@ struct
 
       let rec list_entry ~find acc = function
         | Empty -> acc
-        | Inode i -> list_values ~find acc (get_tree ~find i)
+        | Inode i -> (
+            try
+              let x = get_tree ~find i in
+              list_values ~find acc x
+            with Failure _ -> acc )
 
       and list_inodes ~find acc t =
         Array.fold_left (list_entry ~find) acc t.entries
@@ -441,7 +449,8 @@ struct
           function Values v -> values v | Inodes i -> inodes i)
         |~ case1 "Values" (StepMap.t value_t) (fun t -> Values t)
         |~ case1 "Inodes" (inodes entry) (fun t -> Inodes t)
-        |> sealv |> like ~pre_hash
+        |> sealv
+        |> like ~pre_hash
 
       let t : t Irmin.Type.t =
         let open Irmin.Type in
@@ -777,8 +786,8 @@ struct
   let check_hash expected got =
     if Irmin.Type.equal H.t expected got then ()
     else
-      Fmt.invalid_arg "corrupted value: got %a, expecting %a" T.pp_hash
-        expected T.pp_hash got
+      Fmt.invalid_arg "corrupted value: got %a, expecting %a" T.pp_hash expected
+        T.pp_hash got
 
   let unsafe_add t k v =
     check_hash k (hash v);
@@ -792,4 +801,6 @@ struct
   let integrity_check = Inode.integrity_check
 
   let close = Inode.close
+
+  let clear = Inode.clear
 end

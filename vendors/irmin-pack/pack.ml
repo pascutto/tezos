@@ -93,6 +93,8 @@ module type S = sig
   val integrity_check : offset:int64 -> length:int -> key -> 'a t -> unit
 
   val close : 'a t -> unit Lwt.t
+
+  val clear : 'a t -> unit Lwt.t
 end
 
 module type MAKER = sig
@@ -138,7 +140,7 @@ struct
     index : Index.t;
     dict : Dict.t;
     lock : Lwt_mutex.t;
-    mutable counter : int;
+    mutable open_instances : int;
   }
 
   let clear t =
@@ -147,8 +149,8 @@ struct
     Dict.clear t.dict
 
   let valid t =
-    if t.counter <> 0 then (
-      t.counter <- t.counter + 1;
+    if t.open_instances <> 0 then (
+      t.open_instances <- t.open_instances + 1;
       true )
     else false
 
@@ -160,7 +162,7 @@ struct
     if IO.version block <> current_version then
       Fmt.failwith "invalid version: got %S, expecting %S" (IO.version block)
         current_version;
-    { block; index; lock; dict; counter = 1 }
+    { block; index; lock; dict; open_instances = 1 }
 
   let (`Staged v) =
     with_cache ~clear ~valid ~v:(fun index -> unsafe_v ~index) "store.pack"
@@ -168,8 +170,8 @@ struct
   type key = K.t
 
   let close t =
-    t.counter <- t.counter - 1;
-    if t.counter = 0 then (
+    t.open_instances <- t.open_instances - 1;
+    if t.open_instances = 0 then (
       if not (IO.readonly t.block) then IO.sync t.block;
       IO.close t.block;
       Dict.close t.dict )
@@ -182,7 +184,7 @@ struct
       pack : 'a t;
       lru : V.t Lru.t;
       staging : V.t Tbl.t;
-      mutable counter : int;
+      mutable open_instances : int;
     }
 
     type key = K.t
@@ -191,8 +193,9 @@ struct
 
     type index = Index.t
 
-    let clear t =
+    let unsafe_clear t =
       clear t.pack;
+      ignore (Lru.clear t.lru);
       Tbl.clear t.staging
 
     (* we need another cache here, as we want to share the LRU and
@@ -203,8 +206,8 @@ struct
     let create = Lwt_mutex.create ()
 
     let valid t =
-      if t.counter <> 0 then (
-        t.counter <- t.counter + 1;
+      if t.open_instances <> 0 then (
+        t.open_instances <- t.open_instances + 1;
         true )
       else false
 
@@ -212,21 +215,21 @@ struct
       let pack = v index ~fresh ~readonly root in
       let staging = Tbl.create 127 in
       let lru = Lru.create lru_size in
-      { staging; lru; pack; counter = 1 }
+      { staging; lru; pack; open_instances = 1 }
 
     let unsafe_v ?(fresh = false) ?(readonly = false) ?(lru_size = 10_000)
         ~index root =
       try
         let t = Hashtbl.find roots (root, readonly) in
         if valid t then (
-          if fresh then clear t;
+          if fresh then unsafe_clear t;
           t )
         else (
           Hashtbl.remove roots (root, readonly);
           raise Not_found )
       with Not_found ->
         let t = unsafe_v_no_cache ~fresh ~readonly ~lru_size ~index root in
-        if fresh then clear t;
+        if fresh then unsafe_clear t;
         Hashtbl.add roots (root, readonly) t;
         t
 
@@ -259,8 +262,8 @@ struct
       let k' = V.hash v in
       if Irmin.Type.equal K.t k k' then ()
       else
-        Fmt.failwith "corrupted value: got %a, expecting %a." pp_hash k'
-          pp_hash k
+        Fmt.failwith "corrupted value: got %a, expecting %a." pp_hash k' pp_hash
+          k
 
     let io_read_and_decode ~off ~len t =
       if not (IO.readonly t.pack.block) then
@@ -353,8 +356,8 @@ struct
     let unsafe_add t k v = append t k v
 
     let unsafe_close t =
-      t.counter <- t.counter - 1;
-      if t.counter = 0 then (
+      t.open_instances <- t.open_instances - 1;
+      if t.open_instances = 0 then (
         Log.debug (fun l -> l "[pack] close %s" (IO.name t.pack.block));
         Tbl.clear t.staging;
         ignore (Lru.clear t.lru);
@@ -363,6 +366,11 @@ struct
     let close t =
       Lwt_mutex.with_lock t.pack.lock (fun () ->
           unsafe_close t;
+          Lwt.return_unit)
+
+    let clear t =
+      Lwt_mutex.with_lock t.pack.lock (fun () ->
+          unsafe_clear t;
           Lwt.return_unit)
   end
 end
