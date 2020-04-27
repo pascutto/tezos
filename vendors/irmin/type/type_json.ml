@@ -16,20 +16,12 @@
 
 open Type_core
 
-exception Not_utf8
-
-let is_valid_utf8 str =
-  try
-    Uutf.String.fold_utf_8
-      (fun _ _ -> function `Malformed _ -> raise Not_utf8 | _ -> ())
-      () str;
-    true
-  with Not_utf8 -> false
-
 module Encode = struct
   let lexeme e l = ignore (Jsonm.encode e (`Lexeme l))
 
-  let unit e () = lexeme e `Null
+  let unit e () =
+    lexeme e `Os;
+    lexeme e `Oe
 
   let base64 e s =
     let x = Base64.encode_exn s in
@@ -81,21 +73,28 @@ module Encode = struct
     c e z;
     lexeme e `Ae
 
-  let option o e = function None -> lexeme e `Null | Some x -> o e x
+  let boxed_option o e = function
+    | None -> lexeme e `Null
+    | Some x ->
+        lexeme e `Os;
+        lexeme e (`Name "some");
+        o e x;
+        lexeme e `Oe
 
   let rec t : type a. a t -> a encode_json =
    fun ty e ->
     match ty with
-    | Self s -> t s.self e
+    | Self s -> t s.self_fix e
     | Custom c -> c.encode_json e
     | Map b -> map b e
     | Prim t -> prim t e
     | List l -> list (t l.v) e
     | Array a -> array (t a.v) e
     | Tuple t -> tuple t e
-    | Option x -> option (t x) e
+    | Option x -> boxed_option (t x) e
     | Record r -> record r e
     | Variant v -> variant v e
+    | Var v -> raise (Unbound_type_variable v)
 
   and tuple : type a. a tuple -> a encode_json = function
     | Pair (x, y) -> pair (t x) (t y)
@@ -191,7 +190,7 @@ module Decode = struct
     in
     aux () >|= fun () -> List.rev !lexemes
 
-  let unit e = expect_lexeme e `Null
+  let unit e = expect_lexeme e `Os >>= fun () -> expect_lexeme e `Oe
 
   let get_base64_value e =
     match lexeme e with
@@ -265,26 +264,36 @@ module Decode = struct
     c e >>= fun z ->
     expect_lexeme e `Ae >|= fun () -> (x, y, z)
 
-  let option o e =
+  let unboxed_option o e = o e >|= fun v -> Some v
+
+  let boxed_option o e =
     lexeme e >>= function
     | `Null -> Ok None
-    | lex ->
-        Json.rewind e lex;
-        o e >|= fun v -> Some v
+    | `Os ->
+        expect_lexeme e (`Name "some") >>= fun () ->
+        o e >>= fun v ->
+        expect_lexeme e `Oe >|= fun () -> Some v
+    | l -> error e l "`Option-contents"
 
   let rec t : type a. a t -> a decode_json =
    fun ty d ->
     match ty with
-    | Self s -> t s.self d
+    | Self s -> t s.self_fix d
     | Custom c -> c.decode_json d
     | Map b -> map b d
     | Prim t -> prim t d
     | List l -> list (t l.v) d
     | Array a -> array (t a.v) d
     | Tuple t -> tuple t d
-    | Option x -> option (t x) d
+    | Option x -> boxed_option (t x) d
     | Record r -> record r d
     | Variant v -> variant v d
+    | Var v -> raise (Unbound_type_variable v)
+
+  (* Some types need to be decoded differently when wrapped inside records,
+     since e.g. `k: None` is omitted and `k: Some v` is unboxed into `k: v`. *)
+  and inside_record_t : type a. a t -> a decode_json =
+   fun ty d -> match ty with Option x -> unboxed_option (t x) d | _ -> t ty d
 
   and tuple : type a. a tuple -> a decode_json = function
     | Pair (x, y) -> pair (t x) (t y)
@@ -324,7 +333,7 @@ module Decode = struct
             try
               let s = List.assoc h.fname soup in
               let e = Json.decoder_of_lexemes s in
-              t h.ftype e
+              inside_record_t h.ftype e
             with Not_found -> (
               match h.ftype with
               | Option _ -> Ok None

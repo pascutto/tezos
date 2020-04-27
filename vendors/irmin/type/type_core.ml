@@ -14,6 +14,18 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
+let check_valid_utf8 str =
+  Uutf.String.fold_utf_8
+    (fun _ _ -> function `Malformed _ -> invalid_arg "Malformed UTF-8"
+      | _ -> ())
+    () str
+
+let is_valid_utf8 str =
+  try
+    check_valid_utf8 str;
+    true
+  with Invalid_argument _ -> false
+
 module Json = struct
   type decoder = { mutable lexemes : Jsonm.lexeme list; d : Jsonm.decoder }
 
@@ -57,7 +69,10 @@ type 'a equal = 'a -> 'a -> bool
 
 type 'a short_hash = ?seed:int -> 'a -> int
 
+exception Unbound_type_variable of string
+
 type 'a t =
+  | Var : string -> 'a t
   | Self : 'a self -> 'a t
   | Custom : 'a custom -> 'a t
   | Map : ('a, 'b) map -> 'b t
@@ -88,7 +103,7 @@ and 'a custom = {
 
 and ('a, 'b) map = { x : 'a t; f : 'a -> 'b; g : 'b -> 'a; mwit : 'b Witness.t }
 
-and 'a self = { mutable self : 'a t }
+and 'a self = { self_unroll : 'a t -> 'a t; mutable self_fix : 'a t }
 
 and 'a prim =
   | Unit : unit prim

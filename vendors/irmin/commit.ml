@@ -72,6 +72,8 @@ struct
 
   let find (_, t) = S.find t
 
+  let clear (_, t) = S.clear t
+
   let merge_node (t, _) = Merge.f (N.merge t)
 
   let pp_key = Type.pp S.Key.t
@@ -366,7 +368,7 @@ module History (S : S.COMMIT_STORE) = struct
     set_mark t commit new_mark;
     new_mark
 
-  (* update the ancestors which have already been visited. *)
+  (* update the ancestors which have already been visisted. *)
   let update_ancestors_marks t mark commit =
     let todo = Queue.create () in
     Queue.add commit todo;

@@ -35,7 +35,7 @@ val update : t -> int -> int64 -> unit
     [off]. *)
 
 val finalize : t -> unit
-(** Finalizes the update of the fanout. This is mandatory before any [search]
+(** Finalizes the update of the fanout. This is mendatory before any [search]
     query. *)
 
 val exported_size : t -> int
@@ -49,3 +49,6 @@ val import : hash_size:int -> string -> t
 (** [import ~hash_size buf] decodes [buf] such that
     [import ~hash_size (export t) = t] if [t] was initially created with
     ~hash_size. *)
+
+val clear : unit -> string
+(** [clear ()] return the encoded form of an empty t. *)

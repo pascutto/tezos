@@ -26,6 +26,8 @@ end
 module type S = sig
   include Search.ARRAY
 
+  exception Io_Array of string
+
   type io
 
   val v : io -> t

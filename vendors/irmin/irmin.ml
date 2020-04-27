@@ -100,6 +100,10 @@ functor
       else (
         t.closed := true;
         S.close t.t )
+
+    let clear t =
+      check_not_closed t;
+      S.clear t.t
   end
 
 module AW_check_closed (AW : S.ATOMIC_WRITE_STORE_MAKER) :
@@ -164,6 +168,10 @@ functor
       else (
         t.closed := true;
         S.close t.t )
+
+    let clear t =
+      check_not_closed t;
+      S.clear t.t
   end
 
 module Make_ext
@@ -294,7 +302,7 @@ module type ATOMIC_WRITE_STORE = S.ATOMIC_WRITE_STORE
 
 module type TREE = S.TREE
 
-module type S = S.STORE
+module type S = Store.S
 
 type config = Conf.t
 
@@ -306,7 +314,7 @@ module type APPEND_ONLY_STORE_MAKER = S.APPEND_ONLY_STORE_MAKER
 
 module type ATOMIC_WRITE_STORE_MAKER = S.ATOMIC_WRITE_STORE_MAKER
 
-module type S_MAKER = S.MAKER
+module type S_MAKER = Store.MAKER
 
 module type KV =
   S with type key = string list and type step = string and type branch = string
@@ -363,7 +371,7 @@ module Sync = Sync_ext.Make
 type remote = S.remote = ..
 
 let remote_store (type t) (module M : S with type t = t) (t : t) =
-  let module X : S.STORE with type t = t = M in
+  let module X : Store.S with type t = t = M in
   Sync_ext.remote_store (module X) t
 
 module Metadata = struct

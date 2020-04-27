@@ -87,6 +87,12 @@ val triple : 'a t -> 'b t -> 'c t -> ('a * 'b * 'c) t
 val result : 'a t -> 'b t -> ('a, 'b) result t
 (** [result a b] is a representation of values of type [(a, b) result]. *)
 
+(** An uninhabited type, defined as a variant with no constructors. *)
+type empty = |
+
+val empty : empty t
+(** [empty] is a representation of the {!empty} type. *)
+
 (** {1:records Records} *)
 
 type ('a, 'b, 'c) open_record
@@ -106,7 +112,9 @@ type ('a, 'b) field
 
 val field : string -> 'a t -> ('b -> 'a) -> ('b, 'a) field
 (** [field n t g] is the representation of the field [n] of type [t] with getter
-    [g].
+    [g]. {b Raises.} [Invalid_argument] if [n] is not valid UTF-8.
+
+    The name [n] must not be used by any other [field] in the record.
 
     For instance:
 
@@ -121,7 +129,8 @@ val ( |+ ) :
 (** [r |+ f] is the open record [r] augmented with the field [f]. *)
 
 val sealr : ('a, 'b, 'a) open_record -> 'a t
-(** [sealr r] seals the open record [r]. *)
+(** [sealr r] seals the open record [r]. {b Raises.} [Invalid_argument] if two
+    or more fields share the same name. *)
 
 (** Putting all together:
 
@@ -158,7 +167,12 @@ type 'a case_p
 
 val case0 : string -> 'a -> ('a, 'a case_p) case
 (** [case0 n v] is a representation of a variant constructor [v] with no
-    arguments and name [n]. e.g.
+    arguments and name [n]. {b Raises.} [Invalid_argument] if [n] is not valid
+    UTF-8.
+
+    The name [n] must not by used by any other [case0] in the record.
+
+    For instance:
 
     {[
       type t = Foo
@@ -168,7 +182,12 @@ val case0 : string -> 'a -> ('a, 'a case_p) case
 
 val case1 : string -> 'b t -> ('b -> 'a) -> ('a, 'b -> 'a case_p) case
 (** [case1 n t c] is a representation of a variant constructor [c] with an
-    argument of type [t] and name [n]. e.g.
+    argument of type [t] and name [n]. {b Raises.} [Invalid_argument] if [n] is
+    not valid UTF-8.
+
+    The name [n] must not by used by any other [case1] in the record.
+
+    For instance:
 
     {[
       type t = Foo of string
@@ -181,7 +200,8 @@ val ( |~ ) :
 (** [v |~ c] is the open variant [v] augmented with the case [c]. *)
 
 val sealv : ('a, 'b, 'a -> 'a case_p) open_variant -> 'a t
-(** [sealv v] seals the open variant [v]. *)
+(** [sealv v] seals the open variant [v]. {b Raises.} [Invalid_argument] if two
+    or more cases of same arity share the same name. *)
 
 (** Putting all together:
 
@@ -203,7 +223,9 @@ val enum : string -> (string * 'a) list -> 'a t
       type t = Foo | Bar | Toto
 
       let t = enum "t" [ ("Foo", Foo); ("Bar", Bar); ("Toto", Toto) ]
-    ]} *)
+    ]}
+
+    {b Raises.} [Invalid_argument] if two or more cases share the same name. *)
 
 (** {1:recursive Recursive definitions}
 
@@ -348,14 +370,17 @@ val encode_json : 'a t -> Jsonm.encoder -> 'a -> unit
     relatively straightforward translation of the OCaml structure into JSON. The
     main highlights are:
 
-    - OCaml [ints] are translated into JSON floats.
+    - The unit value [()] is translated into the empty object [{}].
+    - OCaml ints are translated into JSON floats.
     - OCaml strings are translated into JSON strings. You must then ensure that
       the OCaml strings contains only valid UTF-8 characters.
-    - OCaml record fields of type ['a option] are automatically unboxed in their
-      JSON representation. If the value if [None], the field is removed from the
-      JSON object.
-    - variant cases built using {!case0} are represented as strings.
-    - variant cases built using {!case1} are represented as a record with one
+    - OCaml options are translated differently depending on context: record
+      fields with a value of [None] are removed from the JSON object; record
+      fields with a value of [Some x] are automatically unboxed into x; and
+      outside of records, [None] is translated into [null] and [Some x] into
+      [{"some": x'}] with [x'] the JSON encoding of [x].
+    - Variant cases built using {!case0} are represented as strings.
+    - Variant cases built using {!case1} are represented as a record with one
       field; the field name is the name of the variant.
 
     {b NOTE:} this can be used to encode JSON fragments. It's the responsibility
@@ -395,7 +420,7 @@ type 'a size_of = ?headers:bool -> 'a -> int option
 val pre_hash : 'a t -> 'a bin_seq
 (** [pre_hash t x] is the string representation of [x], of type [t], which will
     be used to compute the digest of the value. By default it's
-    [to_bin_string t x] but it can be overridden by {!v}, {!like} and {!map}
+    [to_bin_string t x] but it can be overriden by {!v}, {!like} and {!map}
     operators. *)
 
 val encode_bin : 'a t -> 'a encode_bin

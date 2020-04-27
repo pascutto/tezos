@@ -35,6 +35,8 @@ module type S = sig
 
   val force_offset : t -> int64
 
+  val force_refill : t -> bool
+
   val readonly : t -> bool
 
   val version : t -> string

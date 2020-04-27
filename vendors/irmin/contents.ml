@@ -208,7 +208,7 @@ module Json = struct
     Merge.(option (alist Type.string Json_value.t (fun _ -> Json_value.merge)))
 end
 
-module Json_tree (Store : S.STORE with type contents = json) = struct
+module Json_tree (Store : Store.S with type contents = json) = struct
   include Json_value
 
   let to_concrete_tree j : Store.Tree.concrete =
@@ -288,6 +288,8 @@ struct
   let unsafe_add = S.unsafe_add
 
   let mem = S.mem
+
+  let clear = S.clear
 
   let read_opt t = function None -> Lwt.return_none | Some k -> find t k
 

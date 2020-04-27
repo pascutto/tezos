@@ -26,6 +26,8 @@ end
 module type S = sig
   include Search.ARRAY
 
+  exception Io_Array of string
+
   type io
 
   val v : io -> t
@@ -49,10 +51,14 @@ module Make (IO : Io.S) (Elt : ELT) :
 
   let v io = { io; buffer = None }
 
+  exception Io_Array of string
+
   let get_entry_from_io io off =
     let buf = Bytes.create Elt.encoded_size in
     let n = IO.read io ~off ~len:Elt.encoded_size buf in
-    assert (n = Elt.encoded_size);
+    ( if n <> Elt.encoded_size then
+      let str = Format.sprintf "get entry %Ld" off in
+      raise (Io_Array str) );
     Elt.decode buf 0
 
   let ( -- ) = Int64.sub
@@ -85,9 +91,13 @@ module Make (IO : Io.S) (Elt : ELT) :
     let range = Elt.encoded_size * (1 + Int64.to_int (high -- low)) in
     let low_off = Int64.mul low Elt.encoded_sizeL in
     let high_off = Int64.mul high Elt.encoded_sizeL in
-    let n = IO.read t.io ~off:low_off ~len:range buf in
-    assert (n = range);
-    t.buffer <- Some { buf; low_off; high_off }
+    if high -- low = Int64.zero then ()
+    else
+      let n = IO.read t.io ~off:low_off ~len:range buf in
+      ( if n <> range then
+        let str = Format.sprintf "set buffer %Ld %Ld" high low in
+        raise (Io_Array str) );
+      t.buffer <- Some { buf; low_off; high_off }
 
   let pre_fetch t ~low ~high =
     let range = Elt.encoded_size * (1 + Int64.to_int (high -- low)) in

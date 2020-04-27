@@ -170,8 +170,9 @@ struct
 
     type index = Index.t
 
-    let clear t =
+    let unsafe_clear t =
       clear t.pack;
+      ignore (Lru.clear t.lru);
       Tbl.clear t.staging
 
     (* we need another cache here, as we want to share the LRU and
@@ -198,14 +199,14 @@ struct
       try
         let t = Hashtbl.find roots (root, readonly) in
         if valid t then (
-          if fresh then clear t;
+          if fresh then unsafe_clear t;
           t )
         else (
           Hashtbl.remove roots (root, readonly);
           raise Not_found )
       with Not_found ->
         let t = unsafe_v_no_cache ~fresh ~readonly ~lru_size ~index root in
-        if fresh then clear t;
+        if fresh then unsafe_clear t;
         Hashtbl.add roots (root, readonly) t;
         t
 
@@ -238,14 +239,16 @@ struct
       let k' = V.hash v in
       if Irmin.Type.equal K.t k k' then Ok () else Error (k, k')
 
-    exception Invalid_read
+    exception Invalid_read of string
 
-    let io_read_and_decode ~off ~len t =
+    let io_read_and_decode ~off ~len t k =
       if (not (IO.readonly t.pack.block)) && off > IO.offset t.pack.block then
-        raise Invalid_read;
+        raise (Invalid_read "invalid read off");
       let buf = Bytes.create len in
       let n = IO.read t.pack.block ~off buf in
-      if n <> len then raise Invalid_read;
+      ( if n <> len then
+        let str = Format.asprintf "off = %Ld len = %d %a" off len pp_hash k in
+        raise (Invalid_read str) );
       let hash off = io_read_and_decode_hash ~off t in
       let dict = Dict.find t.pack.dict in
       V.decode_bin ~hash ~dict (Bytes.unsafe_to_string buf) 0
@@ -265,7 +268,7 @@ struct
               match Index.find t.pack.index k with
               | None -> None
               | Some (off, len, _) ->
-                  let v = io_read_and_decode ~off ~len t in
+                  let v = io_read_and_decode ~off ~len t k in
                   (check_key k v |> function
                    | Ok () -> ()
                    | Error (expected, got) ->
@@ -291,11 +294,11 @@ struct
 
     let integrity_check ~offset ~length k t =
       try
-        let value = io_read_and_decode ~off:offset ~len:length t in
+        let value = io_read_and_decode ~off:offset ~len:length t k in
         match check_key k value with
         | Ok () -> Ok ()
         | Error _ -> Error `Wrong_hash
-      with Invalid_read -> Error `Absent_value
+      with Invalid_read _ -> Error `Absent_value
 
     let batch t f =
       f (cast t) >>= fun r ->
@@ -351,6 +354,11 @@ struct
     let close t =
       Lwt_mutex.with_lock t.pack.lock (fun () ->
           unsafe_close t;
+          Lwt.return_unit)
+
+    let clear t =
+      Lwt_mutex.with_lock t.pack.lock (fun () ->
+          unsafe_clear t;
           Lwt.return_unit)
   end
 end

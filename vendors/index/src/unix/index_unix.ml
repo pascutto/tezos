@@ -99,10 +99,10 @@ module IO : Index.IO = struct
         let buf = encode_int64 n in
         unsafe_write t ~off:0L buf
 
-      let get t =
+      let get ?(v = false) t file =
         let buf = Bytes.create 8 in
         let n = unsafe_read t ~off:0L ~len:8 buf in
-        assert (n = 8);
+        if n <> 8 then Fmt.failwith "read of %s failed n =%d at v =%b" file n v;
         decode_int64 (Bytes.unsafe_to_string buf)
     end
 
@@ -211,18 +211,18 @@ module IO : Index.IO = struct
   let offset t = t.offset
 
   let force_offset t =
-    t.offset <- Raw.Offset.get t.raw;
+    t.offset <- Raw.Offset.get t.raw t.file;
     t.offset
 
   let version t = t.version
 
   let get_generation t =
     let i = Raw.Generation.get t.raw in
-    Log.debug (fun m -> m "get_generation: %Ld" i);
+    Log.debug (fun m -> m "[%s] get_generation: %Ld" t.file i);
     i
 
   let set_generation t i =
-    Log.debug (fun m -> m "set_generation: %Ld" i);
+    Log.debug (fun m -> m "[%s] set_generation: %Ld" t.file i);
     Raw.Generation.set t.raw i
 
   let get_fanout t = Raw.Fan.get t.raw
@@ -258,6 +258,7 @@ module IO : Index.IO = struct
 
   let clear ?(keep_generation = false) t =
     t.offset <- 0L;
+    t.fan_size <- 0L;
     t.flushed <- t.header;
     if not keep_generation then Raw.Generation.set t.raw 0L;
     Raw.Offset.set t.raw t.offset;
@@ -313,7 +314,7 @@ module IO : Index.IO = struct
           Raw.Generation.set raw generation;
           v ~fan_size ~offset:0L ~version:current_version raw )
         else
-          let offset = Raw.Offset.get raw in
+          let offset = Raw.Offset.get ~v:true raw file in
           let version = Raw.Version.get raw in
           let fan_size = Raw.Fan.get_size raw in
           v ~fan_size ~offset ~version raw

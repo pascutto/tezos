@@ -182,19 +182,23 @@ struct
     let t = check_open t in
     Log.debug (fun l -> l "clear %S" t.root);
     if t.config.readonly then raise RO_not_allowed;
-    t.generation <- 0L;
     Mutex.with_lock t.merge_lock (fun () ->
+        t.generation <- Int64.succ t.generation;
         let log = assert_and_get t.log in
-        IO.clear log.io;
+        IO.set_generation log.io t.generation;
+        IO.clear ~keep_generation:true log.io;
         Tbl.clear log.mem;
         may
           (fun l ->
-            IO.clear l.io;
+            IO.set_generation l.io t.generation;
+            IO.clear ~keep_generation:true l.io;
             IO.close l.io)
           t.log_async;
         may
           (fun (i : index) ->
-            IO.clear i.io;
+            IO.set_generation i.io t.generation;
+            IO.clear ~keep_generation:true i.io;
+            IO.set_fanout i.io (Fan.clear ());
             IO.close i.io)
           t.index;
         t.index <- None;
@@ -412,7 +416,10 @@ struct
     let low, high =
       Int64.(div low_bytes entry_sizeL, div high_bytes entry_sizeL)
     in
-    Search.interpolation_search (IOArray.v index.io) key ~low ~high
+    try Search.interpolation_search (IOArray.v index.io) key ~low ~high
+    with IOArray.Io_Array s ->
+      let str = Format.sprintf "search low %Ld high %Ld %s" low high s in
+      raise (IOArray.Io_Array str)
 
   let try_load_log t path =
     Log.debug (fun l ->
@@ -464,9 +471,10 @@ struct
           Tbl.clear log.mem;
           iter_io add_log_entry log.io;
           may (fun (i : index) -> IO.close i.io) t.index;
-          if Int64.equal generation 0L then t.index <- None
+          let index_path = index_path t.root in
+          if Int64.equal generation 0L || not (Sys.file_exists index_path) then
+            t.index <- None
           else
-            let index_path = index_path t.root in
             let io =
               IO.v ~fresh:false ~readonly:true ~generation ~fan_size:0L
                 index_path
@@ -484,7 +492,9 @@ struct
         else if log_offset > new_log_offset then
           (* In that case the log has probably been emptied and is being
              refilled with async_log contents. *)
-          no_changes ()
+          Log.debug (fun l ->
+              l "[%s] new log smaller than old one, no changes applied"
+                (Filename.basename t.root))
         else no_changes ()
 
   let find_instance t key =
@@ -710,6 +720,7 @@ struct
 
   let replace t key value =
     let t = check_open t in
+    Stats.incr_nb_replace ();
     Log.info (fun l ->
         l "[%s] replace %a %a" (Filename.basename t.root) K.pp key V.pp value);
     if t.config.readonly then raise RO_not_allowed;
@@ -726,6 +737,13 @@ struct
     in
     if do_merge then
       ignore (merge ~witness:{ key; key_hash = K.hash key; value } t : async)
+
+  let replace_with_timer ?sampling_interval t key value =
+    if sampling_interval <> None then Stats.start_replace ();
+    replace t key value;
+    match sampling_interval with
+    | None -> ()
+    | Some sampling_interval -> Stats.end_replace ~sampling_interval
 
   let filter t f =
     let t = check_open t in
@@ -797,6 +815,8 @@ module Private = struct
     val force_merge : ?hook:[ `After | `Before ] Hook.t -> t -> async
 
     val await : async -> unit
+
+    val replace_with_timer : ?sampling_interval:int -> t -> key -> value -> unit
   end
 
   module Make = Make_private

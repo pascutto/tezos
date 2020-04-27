@@ -39,6 +39,8 @@ module type S = sig
 
   val force_offset : t -> int64
 
+  val force_refill : t -> bool
+
   val readonly : t -> bool
 
   val version : t -> string
@@ -113,11 +115,24 @@ module Unix : S = struct
       Bytes.unsafe_to_string buf
 
     let unsafe_set_version t v = unsafe_write t ~off:8L v
+
+    let unsafe_get_generation t =
+      let buf = Bytes.create 8 in
+      let n = unsafe_read t ~off:16L ~len:8 buf in
+      assert (n = 8);
+      match Irmin.Type.(of_bin_string int64) (Bytes.unsafe_to_string buf) with
+      | Ok t -> t
+      | Error (`Msg e) -> Fmt.failwith "get_offset: %s" e
+
+    let unsafe_set_generation t v =
+      let buf = Irmin.Type.(to_bin_string int64) v in
+      unsafe_write t ~off:16L buf
   end
 
   type t = {
     file : string;
     mutable raw : Raw.t;
+    mutable generation : int64;
     mutable offset : int64;
     mutable flushed : int64;
     readonly : bool;
@@ -127,7 +142,7 @@ module Unix : S = struct
 
   let name t = t.file
 
-  let header = 16L (* offset + version *)
+  let header = 24L (* offset + version + generation *)
 
   let sync t =
     if t.readonly then raise RO_Not_Allowed;
@@ -139,6 +154,7 @@ module Unix : S = struct
     else (
       Raw.unsafe_write t.raw ~off:t.flushed buf;
       Raw.unsafe_set_offset t.raw offset;
+      Raw.unsafe_set_generation t.raw t.generation;
 
       (* concurrent append might happen so here t.offset might differ
          from offset *)
@@ -174,6 +190,11 @@ module Unix : S = struct
     t.offset <- Raw.unsafe_get_offset t.raw;
     t.offset
 
+  let force_refill t =
+    let old_generation = t.generation in
+    t.generation <- Raw.unsafe_get_generation t.raw;
+    old_generation <> t.generation
+
   let version t = t.version
 
   let readonly t = t.readonly
@@ -204,15 +225,13 @@ module Unix : S = struct
   let clear t =
     t.offset <- 0L;
     t.flushed <- header;
+    t.generation <- Int64.succ t.generation;
     Buffer.clear t.buf
 
   let buffers = Hashtbl.create 256
 
   let buffer file =
-    try
-      let buf = Hashtbl.find buffers file in
-      Buffer.clear buf;
-      buf
+    try Hashtbl.find buffers file
     with Not_found ->
       let buf = Buffer.create (4 * 1024) in
       Hashtbl.add buffers file buf;
@@ -220,7 +239,7 @@ module Unix : S = struct
 
   let v ~fresh ~version:current_version ~readonly file =
     assert (String.length current_version = 8);
-    let v ~offset ~version raw =
+    let v ~offset ~version ~generation raw =
       {
         version;
         file;
@@ -229,6 +248,7 @@ module Unix : S = struct
         readonly;
         buf = buffer file;
         flushed = header ++ offset;
+        generation;
       }
     in
     let mode = Unix.(if readonly then O_RDONLY else O_RDWR) in
@@ -239,19 +259,22 @@ module Unix : S = struct
         let raw = Raw.v x in
         Raw.unsafe_set_offset raw 0L;
         Raw.unsafe_set_version raw current_version;
-        v ~offset:0L ~version:current_version raw
+        Raw.unsafe_set_generation raw 0L;
+        v ~offset:0L ~version:current_version ~generation:0L raw
     | true ->
         let x = Unix.openfile file Unix.[ O_EXCL; mode; O_CLOEXEC ] 0o644 in
         let raw = Raw.v x in
         if fresh then (
           Raw.unsafe_set_offset raw 0L;
           Raw.unsafe_set_version raw current_version;
-          v ~offset:0L ~version:current_version raw )
+          Raw.unsafe_set_generation raw 0L;
+          v ~offset:0L ~version:current_version ~generation:0L raw )
         else
           let offset = Raw.unsafe_get_offset raw in
           let version = Raw.unsafe_get_version raw in
           assert (version = current_version);
-          v ~offset ~version raw
+          let generation = Raw.unsafe_get_generation raw in
+          v ~offset ~version ~generation raw
 
   let close t = Unix.close t.raw.fd
 end

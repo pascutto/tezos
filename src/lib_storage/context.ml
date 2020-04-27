@@ -215,7 +215,7 @@ module Conf = struct
 end
 
 module Store =
-  Irmin_pack.Make_ext (Conf) (Irmin.Metadata.None) (Contents)
+  Irmin_pack.Make_ext_layered (Conf) (Irmin.Metadata.None) (Contents)
     (Irmin.Path.String_list)
     (Irmin.Branch.String)
     (Hash)
@@ -292,7 +292,10 @@ let unshallow context =
               >|= fun _ -> ())
         children)
 
+let counter = ref 0
+
 let raw_commit ~time ?(message = "") context =
+counter := succ !counter;
   let info =
     Irmin.Info.v ~date:(Time.Protocol.to_seconds time) ~author:"Tezos" message
   in
@@ -300,7 +303,13 @@ let raw_commit ~time ?(message = "") context =
   unshallow context
   >>= fun () ->
   Store.Commit.v context.index.repo ~info ~parents context.tree
-  >|= fun h ->
+  >>= fun h ->
+  (if (!counter = 50) then (
+      counter := 0;
+      Store.freeze ~max:[ h ] context.index.repo >|= fun () ->
+      Logs.app (fun l -> l "freeze ")
+  )
+  else Lwt.return_unit) >|= fun () ->
   Store.Tree.clear context.tree ;
   h
 
@@ -415,10 +424,13 @@ let fork_test_chain v ~protocol ~expiration =
   set_test_chain v (Forking {protocol; expiration})
 
 (*-- Initialisation ----------------------------------------------------------*)
+let config ?readonly ?index_log_size root =
+  let conf = Irmin_pack.config ?readonly ?index_log_size root in
+  Irmin_pack.config_layers ~conf ~keep_max:true ()
 
 let init ?patch_context ?mapsize:_ ?readonly root =
   Store.Repo.v
-    (Irmin_pack.config ?readonly ?index_log_size:!index_log_size root)
+    (config ?readonly ?index_log_size:!index_log_size root)
   >>= fun repo ->
   let v = {path = root; repo; patch_context} in
   Gc.finalise (fun v -> Lwt.async (fun () -> Store.Repo.close v.repo)) v ;
@@ -681,11 +693,9 @@ module Dumpable_context = struct
 
   let context_tree ctxt = ctxt.tree
 
-  let tree_hash = function
-    | `Node _ as tree ->
-        `Node (Store.Tree.hash tree)
-    | `Contents (b, _) ->
-        `Blob (Store.Contents.hash b)
+ let tree_hash tr =  match Store.Tree.destruct tr with
+    | `Node _ as tree -> `Node (Store.Tree.hash (Store.Tree.v tree))
+    | `Contents (b, _) -> `Blob (Store.Contents.hash b)
 
   let sub_tree tree key = Store.Tree.find_tree tree key
 
