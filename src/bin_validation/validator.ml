@@ -194,7 +194,7 @@ let run stdin stdout =
               >>= return)
     >>=? loop
   in
-  loop ()
+  protect (fun () -> loop ())
 
 let main () =
   let stdin = Lwt_io.of_fd ~mode:Input Lwt_unix.stdin in
