@@ -567,10 +567,10 @@ struct
     ( if not recovery then
       Lwt_mutex.with_lock reset_lock (fun () -> X.Repo.flip_upper t)
     else Lwt.return_unit )
-    >|= fun () ->
-    Lwt.async (fun () ->
-    Lwt.pause () >>= fun () ->
-    may (fun f -> f `Before_Copy) hook >>= fun () ->
+    >>= fun () ->
+    (* Lwt.async (fun () -> *)
+    (* Lwt.pause () >>= fun () -> *)
+    ( may (fun f -> f `Before_Copy) hook >>= fun () ->
       copy t ~keep_max ~squash ~min ~max ~heads () >>= function
       | Ok () ->
           may (fun f -> f `Before_Clear) hook >>= fun () ->
@@ -579,8 +579,8 @@ struct
           Log.debug (fun l -> l "free lock");
           may (fun f -> f `After_Clear) hook
       | Error (`Msg e) ->
-          Fmt.kstrf Lwt.fail_with "[gc_store]: import error %s" e );
-    Log.debug (fun l -> l "after async called to copy")
+          Fmt.kstrf Lwt.fail_with "[gc_store]: import error %s" e )
+    >|= fun () -> Log.debug (fun l -> l "after async called to copy")
 
   let freeze_with_hook ?(min = []) ?(max = []) ?(squash = false) ?keep_max
       ?(heads = []) ?(recovery = false) ?hook t =
