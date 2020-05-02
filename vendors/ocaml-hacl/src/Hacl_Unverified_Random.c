@@ -66,11 +66,31 @@ void hacl_aligned_free(void * ptr) {
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <dirent.h>
+
+int get_num_fds()
+{
+     int fd_count;
+     char buf[64];
+     struct dirent *dp;
+
+     snprintf(buf, 64, "/proc/%i/fd/", getpid());
+
+     fd_count = 0;
+     DIR *dir = opendir(buf);
+     while ((dp = readdir(dir)) != NULL) {
+          fd_count++;
+     }
+     closedir(dir);
+     return fd_count;
+}
+
 
 bool read_random_bytes(uint64_t len, uint8_t * buf) {
   int fd = open("/dev/urandom", O_RDONLY);
   if (fd == -1) {
     printf("Cannot open /dev/urandom\n");
+    printf("opened %i fds", get_num_fds ());
     return false;
   }
   bool pass = true;
