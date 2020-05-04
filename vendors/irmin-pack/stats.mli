@@ -3,6 +3,7 @@ type t = {
   mutable cache_misses : int;
   mutable appended_hashes : int;
   mutable appended_offsets : int;
+  mutable syncs : int;
 }
 (** The type for stats for a store S.
 
@@ -27,6 +28,8 @@ val incr_cache_misses : unit -> unit
 val incr_appended_hashes : unit -> unit
 
 val incr_appended_offsets : unit -> unit
+
+val incr_syncs : unit -> unit
 
 type cache_stats = { cache_misses : float }
 

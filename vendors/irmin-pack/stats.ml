@@ -3,10 +3,17 @@ type t = {
   mutable cache_misses : int;
   mutable appended_hashes : int;
   mutable appended_offsets : int;
+  mutable syncs : int;
 }
 
 let fresh_stats () =
-  { finds = 0; cache_misses = 0; appended_hashes = 0; appended_offsets = 0 }
+  {
+    finds = 0;
+    cache_misses = 0;
+    appended_hashes = 0;
+    appended_offsets = 0;
+    syncs = 0;
+  }
 
 let stats = fresh_stats ()
 
@@ -15,6 +22,7 @@ let reset_stats () =
   stats.cache_misses <- 0;
   stats.appended_hashes <- 0;
   stats.appended_offsets <- 0;
+  stats.syncs <- 0;
   ()
 
 let get () = stats
@@ -28,6 +36,8 @@ let incr_appended_hashes () =
 
 let incr_appended_offsets () =
   stats.appended_offsets <- succ stats.appended_offsets
+
+let incr_syncs () = stats.syncs <- succ stats.syncs
 
 type cache_stats = { cache_misses : float }
 

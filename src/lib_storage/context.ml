@@ -30,7 +30,37 @@
 module Path = Irmin.Path.String_list
 module Metadata = Irmin.Metadata.None
 
-let reporter () =
+let reset_stats () = Index.Stats.reset_stats ()
+
+let file_reporter () =
+  let buf_fmt ~like =
+    let b = Buffer.create 512 in
+    ( Fmt.with_buffer ~like b,
+      fun () ->
+        let m = Buffer.contents b in
+        Buffer.reset b;
+        m )
+  in
+  let fd =
+    Unix.openfile "my_file.log" Unix.[ O_CREAT; O_WRONLY; O_APPEND ] 0o644
+  in
+  let report src level ~over k msgf =
+    let app, app_flush = buf_fmt ~like:Fmt.stdout in
+    let dst, dst_flush = buf_fmt ~like:Fmt.stderr in
+    let reporter = Logs_fmt.reporter ~app ~dst () in
+    let k () =
+      let buf = Bytes.unsafe_of_string (app_flush ()) in
+      let _ = Unix.write fd buf 0 (Bytes.length buf) in
+      let buf = Bytes.unsafe_of_string (dst_flush ()) in
+      let _ = Unix.write fd buf 0 (Bytes.length buf) in
+      over ();
+      k ()
+    in
+    reporter.Logs.report src level ~over:(fun () -> ()) k msgf
+  in
+  { Logs.report }
+
+let _reporter () =
   let report src level ~over k msgf =
     let k _ = over () ; k () in
     let with_stamp h _tags k fmt =
@@ -53,9 +83,10 @@ let index_log_size = ref None
 
 let () =
   let verbose () =
-    Logs.set_level (Some Logs.Debug) ;
-    Logs.set_reporter (reporter ())
+    Logs.set_level (Some Logs.App) ;
+    Logs.set_reporter (file_reporter ())
   in
+  verbose ();
   let index_log_size n = index_log_size := Some (int_of_string n) in
   match Unix.getenv "TEZOS_STORAGE" with
   | exception Not_found ->
@@ -295,7 +326,7 @@ let unshallow context =
 let counter = ref 0
 
 let raw_commit ~time ?(message = "") context =
-counter := succ !counter;
+  counter := succ !counter;
   let info =
     Irmin.Info.v ~date:(Time.Protocol.to_seconds time) ~author:"Tezos" message
   in
@@ -306,8 +337,15 @@ counter := succ !counter;
   >>= fun h ->
   (if (!counter = 50) then (
       counter := 0;
+      let s = Index.Stats.get () in
+      let v = Irmin_pack.Stats.get () in
+      Logs.app (fun l -> l "before freeze %d %d %d %d %d" s.Index.Stats.nb_merge s.Index.Stats.nb_writes
+                  v.Irmin_pack.Stats.appended_hashes v.Irmin_pack.Stats.appended_offsets v.Irmin_pack.Stats.syncs);
       Store.freeze ~max:[ h ] context.index.repo >|= fun () ->
-      Logs.app (fun l -> l "freeze ")
+      let s = Index.Stats.get () in
+      let v = Irmin_pack.Stats.get () in
+      Logs.app (fun l -> l "after freeze %d %d %d %d %d" s.Index.Stats.nb_merge s.Index.Stats.nb_writes
+                  v.Irmin_pack.Stats.appended_hashes v.Irmin_pack.Stats.appended_offsets v.Irmin_pack.Stats.syncs)
   )
   else Lwt.return_unit) >|= fun () ->
   Store.Tree.clear context.tree ;
@@ -429,6 +467,7 @@ let config ?readonly ?index_log_size root =
   Irmin_pack.config_layers ~conf ~keep_max:true ()
 
 let init ?patch_context ?mapsize:_ ?readonly root =
+  reset_stats ();
   Store.Repo.v
     (config ?readonly ?index_log_size:!index_log_size root)
   >>= fun repo ->

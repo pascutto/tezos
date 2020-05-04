@@ -328,7 +328,9 @@ struct
           V.encode_bin ~offset ~dict v k (IO.append t.pack.block);
           let len = Int64.to_int (IO.offset t.pack.block -- off) in
           Index.add t.pack.index k (off, len, V.magic v);
-          if Tbl.length t.staging >= auto_flush then sync t
+          if Tbl.length t.staging >= auto_flush then (
+            Stats.incr_syncs ();
+            sync t )
           else Tbl.add t.staging k v;
           Lru.add t.lru k v
 
